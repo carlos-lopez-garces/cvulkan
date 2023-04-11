@@ -36,4 +36,22 @@ struct DeviceCreation {
     DeviceCreation &set_linear_allocator(StackAllocator *allocator);
 };
 
+class GpuDevice : public Service {
+private:
+    Allocator *allocator;
+    StackAllocator *temporary_allocator;
+
+    // TODO: what is this?
+    StringBuffer string_buffer;
+
+    // Vulkan.
+    // Structure containing callback function pointers for memory allocation.
+    VkAllocationCallbacks *vulkan_allocation_callbacks;
+
+public:
+    RAPTOR_DECLARE_SERVICE(GpuDevice);
+
+    void init(const DeviceCreation &creation);
+};
+
 }
