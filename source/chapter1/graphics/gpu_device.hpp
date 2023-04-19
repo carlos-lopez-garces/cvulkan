@@ -288,6 +288,9 @@ struct GpuDevice : public Service {
     // (Opaque handle to) Bindless descriptor set. Its layout is vulkan_bindless_descriptor_layout.
     VkDescriptorSet                 vulkan_bindless_descriptor_set;
 
+    // Array of textures that can be updated after they are bound.
+    Array<ResourceUpdate>           texture_to_update_bindless;
+
     // Swapchain
     VkImage                         vulkan_swapchain_images[ k_max_swapchain_images ];
     VkImageView                     vulkan_swapchain_image_views[ k_max_swapchain_images ];

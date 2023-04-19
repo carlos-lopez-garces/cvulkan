@@ -637,7 +637,8 @@ void GpuDevice::init( const DeviceCreation& creation ) {
 
         // TODO: in bindless_flags, VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT is
         // commented out. Here's where we latch a VkDescriptorSetVariableDescriptorCountAllocateInfoEXT
-        // onto alloc_info.
+        // onto alloc_info. We use this to have tightly-packed texture arrays, instead of
+        // arrays with some dummy textures. See page 38.
 
         // Allocate descriptor set.
         check_result(vkAllocateDescriptorSets(
@@ -697,6 +698,9 @@ void GpuDevice::init( const DeviceCreation& creation ) {
 
     resource_deletion_queue.init( allocator, 16 );
     descriptor_set_updates.init( allocator, 16 );
+
+    // Array of textures that can be updated after they are bound.
+    texture_to_update_bindless.init( allocator, 16 );
 
     //
     // Init primitive resources
@@ -864,6 +868,7 @@ void GpuDevice::shutdown() {
 
     vmaDestroyAllocator( vma_allocator );
 
+    texture_to_update_bindless.shutdown();
     resource_deletion_queue.shutdown();
     descriptor_set_updates.shutdown();
 
@@ -1029,6 +1034,13 @@ static void vulkan_create_texture(
     gpu.set_resource_name(VK_OBJECT_TYPE_IMAGE_VIEW, (u64) texture->vk_image_view, creation.name);
 
     texture->vk_image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (gpu.bindless_supported) {
+        // Bindless textures can be updated after they are bound.
+        ResourceUpdate resource_update{ResourceDeletionType::Texture, texture->handle.index, gpu.current_frame};
+        // texture_to_update_bindless is class instance member of GpuDevice.
+        gpu.texture_to_update_bindless.push(resource_update);
+    }
 }
 
 TextureHandle GpuDevice::create_texture( const TextureCreation& creation ) {
@@ -2220,9 +2232,10 @@ void GpuDevice::destroy_buffer( BufferHandle buffer ) {
     }
 }
 
-void GpuDevice::destroy_texture( TextureHandle texture ) {
+void GpuDevice::destroy_texture(TextureHandle texture) {
     if ( texture.index < textures.pool_size ) {
-        resource_deletion_queue.push( { ResourceDeletionType::Texture, texture.index, current_frame } );
+        resource_deletion_queue.push({ ResourceDeletionType::Texture, texture.index, current_frame });
+        texture_to_update_bindless.push({ ResourceDeletionType::Texture, texture.index, current_frame });
     } else {
         rprint( "Graphics error: trying to free invalid Texture %u\n", texture.index );
     }
@@ -2849,6 +2862,81 @@ void GpuDevice::present() {
 
     // This is called inside resize_swapchain as well to correctly work.
     frame_counters_advance();
+
+    if (texture_to_update_bindless.size) {
+        // TODO: what is a deferred write?
+
+        // Limits the number of writes performed in each frame.
+        static constexpr u32 k_num_writes_per_frame = 16;
+
+        // A VkWriteDescriptorSet specifies the parameters of a descriptor set write operation.
+        // We'll populate an entry for each texture found in texture_to_update_bindless and then
+        // perform all these writes with a vkUpdateDescriptorSets() call.
+        VkWriteDescriptorSet bindless_descriptor_writes[k_num_writes_per_frame];
+
+        VkDescriptorImageInfo bindless_image_info[k_num_writes_per_frame];
+
+        Texture *vk_dummy_texture = access_texture(dummy_texture);
+
+        u32 current_write_index = 0;
+        for (i32 it = texture_to_update_bindless.size - 1; it >= 0; --it) {
+            if (current_write_index == k_num_writes_per_frame) {
+                // Reached the maximum number of writes per frame.
+                break;
+            }
+
+            // Populate an entry of bindless_descriptor_writes.
+            //
+            // Some entries in texture_to_update_bindless may actually be empty slots;
+            // for those cases, we populate a write entry but with a dummy texture.
+
+            ResourceUpdate &texture_to_update = texture_to_update_bindless[it];
+            Texture *texture = access_texture({ texture_to_update.handle });
+            VkWriteDescriptorSet &descriptor_write = bindless_descriptor_writes[current_write_index];
+            // VkWriteDescriptorSet.sType.
+            descriptor_write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            descriptor_write.descriptorCount = 1;
+            descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            // Write destination: descriptor set -> binding (of an array of textures in this case) -> array element index (handle).
+            descriptor_write.dstSet = vulkan_bindless_descriptor_set;
+            descriptor_write.dstBinding = k_bindless_texture_binding;
+            descriptor_write.dstArrayElement = texture_to_update.handle;
+
+            RASSERT( texture->handle.index == texture_to_update.handle );
+
+            VkDescriptorImageInfo &descriptor_image_info = bindless_image_info[current_write_index];
+            if (texture->sampler != nullptr) {
+                // The texture was assigned a sampler previously.
+                descriptor_image_info.sampler = texture->sampler->vk_sampler;
+            }
+            else {
+                // Use the default sampler.
+                Sampler *vk_default_sampler = access_sampler(default_sampler);
+                descriptor_image_info.sampler = vk_default_sampler->vk_sampler;
+            }
+            // The slot is empty. Use a dummy texture.
+            descriptor_image_info.imageView = texture->vk_format != VK_FORMAT_UNDEFINED ? texture->vk_image_view : vk_dummy_texture->vk_image_view;
+            // A layout allowing read-only access in a shader as a sampled image, combined image/sampler,
+            // or input attachment. This layout is valid only for image subresources of images created with
+            // the VK_IMAGE_USAGE_SAMPLED_BIT or VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT usage bits enabled.
+            descriptor_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            descriptor_write.pImageInfo = &descriptor_image_info;
+
+            // TODO: ?
+            texture_to_update.current_frame = u32_max;
+
+            // Write completed. Delete texture from list of pending bindless updates.
+            texture_to_update_bindless.delete_swap(it);
+            ++current_write_index;
+        }
+
+        if (current_write_index) {
+            // There is a total of #current_write_index writes to perform in bindless_descriptor_writes.
+            vkUpdateDescriptorSets(
+                vulkan_device, current_write_index, bindless_descriptor_writes, 0, nullptr
+            );
+        }
+    }
 
     // Resource deletion using reverse iteration and swap with last element.
     if ( resource_deletion_queue.size > 0 ) {
