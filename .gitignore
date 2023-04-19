@@ -31,3 +31,5 @@
 # VS code
 .vscode
 *.code-workspace
+
+binaries/scenes
