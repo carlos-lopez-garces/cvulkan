@@ -344,9 +344,9 @@ void GpuDevice::init( const DeviceCreation& creation ) {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
         // pNext.
         nullptr
-        // A bunch of VkBool32 fields follow, corresponding to individual features. A
-        // vkGetPhysicalDeviceFeatures2 call populates each field telling whether the
-        // feature is supported.
+        // A bunch of VkBool32 fields follow, corresponding to individual descriptor indexing
+        // features. A vkGetPhysicalDeviceFeatures2 call populates each field telling whether
+        // the feature is supported.
     };
     VkPhysicalDeviceFeatures2 device_features {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -355,6 +355,8 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     };
     // Reports capabilities of a physical device.
     vkGetPhysicalDeviceFeatures2(vulkan_physical_device, &device_features);
+    // The descriptorBindingPartiallyBound feature allows us to statically use a descriptor set 
+    // binding in which some descriptors are not valid.
     bindless_supported = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray;
 
     //////// Create logical device
@@ -394,17 +396,23 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     queue_info[ 0 ].queueCount = 1;
     queue_info[ 0 ].pQueuePriorities = queue_priority;
 
-    // Enable all features: just pass the physical features 2 struct.
+    // Enable all features.
     VkPhysicalDeviceFeatures2 physical_features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-    vkGetPhysicalDeviceFeatures2( vulkan_physical_device, &physical_features2 );
+    vkGetPhysicalDeviceFeatures2(vulkan_physical_device, &physical_features2);
 
     VkDeviceCreateInfo device_create_info = {};
     device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    device_create_info.queueCreateInfoCount = sizeof( queue_info ) / sizeof( queue_info[ 0 ] );
+    device_create_info.queueCreateInfoCount = sizeof(queue_info) / sizeof(queue_info[0]);
     device_create_info.pQueueCreateInfos = queue_info;
     device_create_info.enabledExtensionCount = device_extension_count;
     device_create_info.ppEnabledExtensionNames = device_extensions;
     device_create_info.pNext = &physical_features2;
+
+    if (bindless_supported) {
+        // The descriptor indexing features that are supported by the driver were
+        // queried earlier. Append them to the physical features that we want to enable.
+        physical_features2.pNext = &indexing_features;
+    }
 
     result = vkCreateDevice( vulkan_physical_device, &device_create_info, vulkan_allocation_callbacks, &vulkan_device );
     check( result );
