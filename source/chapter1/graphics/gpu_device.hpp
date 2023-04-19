@@ -274,8 +274,19 @@ struct GpuDevice : public Service {
 
     // Regular descriptor pool.
     VkDescriptorPool                vulkan_descriptor_pool;
+
     // Bindless descriptor pool.
     VkDescriptorPool                vulkan_bindless_descriptor_pool;
+
+    // (Opaque handle to) Bindless descriptor set layout.
+    // A descriptor set layout object is defined by an array of zero or more descriptor bindings.
+    // Each individual descriptor binding is specified by a descriptor type, a count (array size)
+    // of the number of descriptors in the binding, a set of shader stages that can access the
+    // binding, and (if using immutable samplers) an array of sampler descriptors.
+    VkDescriptorSetLayout           vulkan_bindless_descriptor_layout;
+
+    // (Opaque handle to) Bindless descriptor set. Its layout is vulkan_bindless_descriptor_layout.
+    VkDescriptorSet                 vulkan_bindless_descriptor_set;
 
     // Swapchain
     VkImage                         vulkan_swapchain_images[ k_max_swapchain_images ];

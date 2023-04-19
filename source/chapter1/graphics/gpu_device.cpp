@@ -363,7 +363,7 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     // Reports capabilities of a physical device.
     vkGetPhysicalDeviceFeatures2(vulkan_physical_device, &device_features);
     // The descriptorBindingPartiallyBound feature allows us to statically use a descriptor set 
-    // binding in which some descriptors are not valid.
+    // binding in which some descriptors are not valid at the time the descriptors are consumed.
     bindless_supported = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray;
 
     //////// Create logical device
@@ -581,6 +581,71 @@ void GpuDevice::init( const DeviceCreation& creation ) {
         image_sampler_binding.binding = k_bindless_texture_binding + 1;
         image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
         image_sampler_binding.pImmutableSamplers = nullptr;
+
+        // Populate creation struct for the descriptor set layout. This struct is later extended
+        // with a chained VkDescriptorSetLayoutBindingFlagsCreateInfoEXT struct that configures
+        // bindings for bindless resources.
+        VkDescriptorSetLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        layout_info.bindingCount = pool_count;
+        layout_info.pBindings = vk_binding;
+        // This flag is provided by the VK_EXT_descriptor_indexing feature. Note that we can
+        // specify this flag only because the pool was created with flag VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT_EXT.
+        layout_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT_EXT;
+
+        VkDescriptorBindingFlags bindless_flags = 
+            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT 
+
+            /* | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT */  
+            
+            // Indicates that descriptors in this binding that are not dynamically used need not 
+            // contain valid descriptors at the time the descriptors are consumed. A descriptor is
+            // dynamically used if any shader invocation executes an instruction that performs any
+            // memory access using the descriptor. If a descriptor is not dynamically used, any 
+            // resource referenced by the descriptor is not considered to be referenced during command
+            // execution.
+            | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT;
+        
+        // Note that vk_binding also has 4 entries.
+        VkDescriptorBindingFlags binding_flags[4];
+        binding_flags[0] = bindless_flags;
+        binding_flags[1] = bindless_flags;
+
+        // Extend the descriptor set layout creation struct with configuration for bindless.
+        VkDescriptorSetLayoutBindingFlagsCreateInfoEXT extended_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, nullptr };
+        extended_info.bindingCount = pool_count;
+        extended_info.pBindingFlags = binding_flags;
+        layout_info.pNext = &extended_info;
+
+        // Create the descriptor set layout.
+        // A descriptor set layout object is defined by an array of zero or more descriptor bindings.
+        // Each individual descriptor binding is specified by a descriptor type, a count (array size)
+        // of the number of descriptors in the binding, a set of shader stages that can access the
+        // binding, and (if using immutable samplers) an array of sampler descriptors.
+        vkCreateDescriptorSetLayout(
+            vulkan_device,
+            &layout_info,
+            vulkan_allocation_callbacks,
+            // Class instance member.
+            &vulkan_bindless_descriptor_layout
+        );
+
+        // Allocate a descriptor set in the pool that follows the layout we just built. 
+        VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        alloc_info.descriptorPool = vulkan_bindless_descriptor_pool;
+        alloc_info.descriptorSetCount = 1;
+        alloc_info.pSetLayouts = &vulkan_bindless_descriptor_layout;
+
+        // TODO: in bindless_flags, VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT is
+        // commented out. Here's where we latch a VkDescriptorSetVariableDescriptorCountAllocateInfoEXT
+        // onto alloc_info.
+
+        // Allocate descriptor set.
+        check_result(vkAllocateDescriptorSets(
+            vulkan_device,
+            &alloc_info,
+            // Class instance member.
+            &vulkan_bindless_descriptor_set
+        ));
     }
 
     // Create timestamp query pool used for GPU timings.
