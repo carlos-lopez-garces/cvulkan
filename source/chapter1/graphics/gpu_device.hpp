@@ -271,7 +271,11 @@ struct GpuDevice : public Service {
     VkDevice                        vulkan_device;
     VkQueue                         vulkan_queue;
     uint32_t                        vulkan_queue_family;
+
+    // Regular descriptor pool.
     VkDescriptorPool                vulkan_descriptor_pool;
+    // Bindless descriptor pool.
+    VkDescriptorPool                vulkan_bindless_descriptor_pool;
 
     // Swapchain
     VkImage                         vulkan_swapchain_images[ k_max_swapchain_images ];

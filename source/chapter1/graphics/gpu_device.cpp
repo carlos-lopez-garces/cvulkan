@@ -230,6 +230,7 @@ static CommandBufferRing command_buffer_ring;
 
 static sizet            s_ubo_alignment = 256;
 static sizet            s_ssbo_alignemnt = 256;
+static const u32        k_max_bindless_resources = 1024;
 
 void GpuDevice::init( const DeviceCreation& creation ) {
 
@@ -493,7 +494,8 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     result = vmaCreateAllocator( &allocatorInfo, &vma_allocator );
     check( result );
 
-    ////////  Create pools
+    // Create regular descriptor pools. Unlike bindless descriptor pools, these
+    // descriptors cannot be updated after they have been bound.
     static const u32 k_global_pool_elements = 128;
     VkDescriptorPoolSize pool_sizes[] =
     {
@@ -512,11 +514,38 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = k_global_pool_elements * ArraySize( pool_sizes );
-    pool_info.poolSizeCount = ( u32 )ArraySize( pool_sizes );
+    pool_info.maxSets = k_global_pool_elements * ArraySize(pool_sizes);
+    pool_info.poolSizeCount = (u32) ArraySize(pool_sizes);
     pool_info.pPoolSizes = pool_sizes;
-    result = vkCreateDescriptorPool( vulkan_device, &pool_info, vulkan_allocation_callbacks, &vulkan_descriptor_pool );
-    check( result );
+    result = vkCreateDescriptorPool(vulkan_device, &pool_info, vulkan_allocation_callbacks, &vulkan_descriptor_pool);
+    check(result);
+
+    // Create bindless descriptor pools, if supported.
+    if (bindless_supported) {
+        // The bindless feature allows us to allocate descriptor sets that support updating
+        // the content of textures after they are bound.
+
+        VkDescriptorPoolSize pool_sizes_bindless[] = {
+            // { VkDescriptorType type, descriptorCount }. 
+            // 2 types of descriptors, k_max_bindless_resources of each.
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_max_bindless_resources },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, k_max_bindless_resources },
+        };
+
+        // This flag is provided by the VK_EXT_descriptor_indexing feature.
+        pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT_EXT;
+        pool_info.maxSets = k_max_bindless_resources * ArraySize(pool_sizes_bindless);
+        pool_info.poolSizeCount = (u32) ArraySize(pool_sizes_bindless);
+        pool_info.pPoolSizes = pool_sizes_bindless;
+        result = vkCreateDescriptorPool(
+            vulkan_device,
+            &pool_info,
+            vulkan_allocation_callbacks,
+            // Class instance member.
+            &vulkan_bindless_descriptor_pool
+        );
+        check(result);
+    }
 
     // Create timestamp query pool used for GPU timings.
     VkQueryPoolCreateInfo vqpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0, VK_QUERY_TYPE_TIMESTAMP, creation.gpu_time_queries_per_frame * 2u * k_max_frames, 0 };
