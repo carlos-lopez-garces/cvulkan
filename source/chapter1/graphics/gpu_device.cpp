@@ -416,6 +416,8 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     device_create_info.pNext = &physical_features2;
 
     if (bindless_supported) {
+        indexing_features.descriptorBindingPartiallyBound = VK_TRUE;
+        indexing_features.runtimeDescriptorArray = VK_TRUE;
         // The descriptor indexing features that are supported by the driver were
         // queried earlier. Append them to the physical features that we want to enable.
         physical_features2.pNext = &indexing_features;
@@ -575,12 +577,12 @@ void GpuDevice::init( const DeviceCreation& creation ) {
 
         // TODO: what does this binding bind and to what?
         VkDescriptorSetLayoutBinding &storage_image_binding = vk_binding[1];
-        image_sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        image_sampler_binding.descriptorCount = k_max_bindless_resources;
+        storage_image_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        storage_image_binding.descriptorCount = k_max_bindless_resources;
         // TODO: in which shader is this binding?
-        image_sampler_binding.binding = k_bindless_texture_binding + 1;
-        image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
-        image_sampler_binding.pImmutableSamplers = nullptr;
+        storage_image_binding.binding = k_bindless_texture_binding + 1;
+        storage_image_binding.stageFlags = VK_SHADER_STAGE_ALL;
+        storage_image_binding.pImmutableSamplers = nullptr;
 
         // Populate creation struct for the descriptor set layout. This struct is later extended
         // with a chained VkDescriptorSetLayoutBindingFlagsCreateInfoEXT struct that configures
@@ -621,13 +623,13 @@ void GpuDevice::init( const DeviceCreation& creation ) {
         // Each individual descriptor binding is specified by a descriptor type, a count (array size)
         // of the number of descriptors in the binding, a set of shader stages that can access the
         // binding, and (if using immutable samplers) an array of sampler descriptors.
-        vkCreateDescriptorSetLayout(
+        check_result(vkCreateDescriptorSetLayout(
             vulkan_device,
             &layout_info,
             vulkan_allocation_callbacks,
             // Class instance member.
             &vulkan_bindless_descriptor_layout
-        );
+        ));
 
         // Allocate a descriptor set in the pool that follows the layout we just built. 
         VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -889,6 +891,20 @@ void GpuDevice::shutdown() {
     auto vkDestroyDebugUtilsMessengerEXT = ( PFN_vkDestroyDebugUtilsMessengerEXT )vkGetInstanceProcAddr( vulkan_instance, "vkDestroyDebugUtilsMessengerEXT" );
     vkDestroyDebugUtilsMessengerEXT( vulkan_instance, vulkan_debug_utils_messenger, vulkan_allocation_callbacks );
 #endif // IMGUI_VULKAN_DEBUG_REPORT
+
+    if (bindless_supported) {
+        vkDestroyDescriptorSetLayout(
+            vulkan_device,
+            vulkan_bindless_descriptor_layout,
+            vulkan_allocation_callbacks
+        );
+
+        vkDestroyDescriptorPool(
+            vulkan_device,
+            vulkan_bindless_descriptor_pool,
+            vulkan_allocation_callbacks
+        );
+    }
 
     vkDestroyDescriptorPool( vulkan_device, vulkan_descriptor_pool, vulkan_allocation_callbacks );
     vkDestroyQueryPool( vulkan_device, vulkan_timestamp_query_pool, vulkan_allocation_callbacks );
@@ -1346,6 +1362,13 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation ) {
         vk_layouts[ l ] = pipeline->descriptor_set_layout[ l ]->vk_descriptor_set_layout;
     }
 
+    u32 bindless_active = 0;
+    if (bindless_supported) {
+        vk_layouts[creation.num_active_layouts] = vulkan_bindless_descriptor_layout;
+        bindless_active = 1;
+    }
+
+
     VkPipelineLayoutCreateInfo pipeline_layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pipeline_layout_info.pSetLayouts = vk_layouts;
     pipeline_layout_info.setLayoutCount = creation.num_active_layouts;
@@ -1354,7 +1377,7 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation ) {
     check( vkCreatePipelineLayout( vulkan_device, &pipeline_layout_info, vulkan_allocation_callbacks, &pipeline_layout ) );
     // Cache pipeline layout
     pipeline->vk_pipeline_layout = pipeline_layout;
-    pipeline->num_active_layouts = creation.num_active_layouts;
+    pipeline->num_active_layouts = creation.num_active_layouts + bindless_active;
 
     // Create full pipeline
     if ( shader_state_data->graphics_pipeline ) {
@@ -1671,6 +1694,12 @@ DescriptorSetLayoutHandle GpuDevice::create_descriptor_set_layout( const Descrip
         binding.type = input_binding.type;
         binding.name = input_binding.name;
 
+        // Is this where resourced are bound? If so, we don't bid bindless textures; those 
+        // are bound in the global bindless arrays.
+        if (bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
+            continue;
+        }
+
         VkDescriptorSetLayoutBinding& vk_binding = descriptor_set_layout->vk_binding[ used_bindings ];
         ++used_bindings;
 
@@ -1708,6 +1737,12 @@ static void vulkan_fill_write_descriptor_sets( GpuDevice& gpu, const DesciptorSe
         u32 layout_binding_index = bindings[ r ];
 
         const DescriptorBinding& binding = descriptor_set_layout->bindings[ layout_binding_index ];
+
+        // Is this where resourced are bound? If so, we don't bid bindless textures; those 
+        // are bound in the global bindless arrays.
+        if (gpu.bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
+            continue;
+        }
 
         u32 i = used_resources;
         ++used_resources;
