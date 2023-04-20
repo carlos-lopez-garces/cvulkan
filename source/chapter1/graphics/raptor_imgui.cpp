@@ -170,7 +170,7 @@ void ImGuiService::init( void* configuration ) {
 
     pipeline_creation.add_descriptor_set_layout( g_descriptor_set_layout );
 
-    g_imgui_pipeline = gpu->create_pipeline( pipeline_creation );
+    g_imgui_pipeline = gpu->create_pipeline( pipeline_creation, nullptr );
 
     // Create constant buffer
     BufferCreation cb_creation;

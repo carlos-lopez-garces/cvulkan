@@ -44,6 +44,8 @@ struct CommandBuffer {
 
     void                            reset();
 
+    void                            bind_local_descriptor_set( DescriptorSetHandle* handles, u32 num_lists, u32* offsets, u32 num_offsets );
+
     VkCommandBuffer                 vk_command_buffer;
 
     GpuDevice*                      device;
@@ -63,6 +65,9 @@ struct CommandBuffer {
     u32                             buffer_size         = 0;
 
     bool                            baked               = false;        // If baked reset will affect only the read of the commands.
+
+    ResourcePool                    descriptor_sets;
+    GpuDevice*                      gpu_device;
 
 }; // struct CommandBuffer
 

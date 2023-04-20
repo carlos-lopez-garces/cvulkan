@@ -72,6 +72,88 @@ static TextureHandle create_texture_from_file( GpuDevice& gpu, cstring filename,
     return k_invalid_texture;
 }
 
+static TextureHandle create_texture_from_file( GpuDevice& gpu, cstring filename, cstring name, bool create_mipmaps ) {
+
+    if ( filename ) {
+        int comp, width, height;
+        uint8_t* image_data = stbi_load( filename, &width, &height, &comp, 4 );
+        if ( !image_data ) {
+            rprint( "Error loading texture %s", filename );
+            return k_invalid_texture;
+        }
+
+        u32 mip_levels = 1;
+        if ( create_mipmaps ) {
+            u32 w = width;
+            u32 h = height;
+
+            while (w > 1 && h > 1) {
+                w /= 2;
+                h /= 2;
+
+                ++mip_levels;
+            }
+        }
+
+        TextureCreation creation;
+        creation.set_data( image_data ).set_format_type( VK_FORMAT_R8G8B8A8_UNORM, TextureType::Texture2D ).set_flags( mip_levels, 0 ).set_size( ( u16 )width, ( u16 )height, 1 ).set_name( name );
+
+        raptor::TextureHandle new_texture = gpu.create_texture( creation );
+
+        // IMPORTANT:
+        // Free memory loaded from file, it should not matter!
+        free( image_data );
+
+        return new_texture;
+    }
+
+    return k_invalid_texture;
+}
+
+Program* Renderer::create_program( const ProgramCreation& creation ) {
+    Program* program = programs.obtain();
+    if ( program ) {
+        const u32 num_passes = 1;
+        // First create arrays
+        program->passes.init( gpu->allocator, num_passes, num_passes );
+
+        program->name = creation.pipeline_creation.name;
+
+        StringBuffer pipeline_cache_path;
+        pipeline_cache_path.init( 1024, gpu->allocator );
+
+        for ( uint32_t i = 0; i < num_passes; ++i ) {
+            ProgramPass& pass = program->passes[ i ];
+
+            if ( creation.pipeline_creation.name != nullptr ) {
+                char* cache_path = pipeline_cache_path.append_use_f("%s%s.cache", "shaders/", creation.pipeline_creation.name );
+
+                pass.pipeline = gpu->create_pipeline( creation.pipeline_creation, cache_path );
+            } else {
+                pass.pipeline = gpu->create_pipeline( creation.pipeline_creation, nullptr );
+            }
+
+            pass.descriptor_set_layout = gpu->get_descriptor_set_layout( pass.pipeline, 0 );
+        }
+
+        pipeline_cache_path.shutdown();
+
+        if ( creation.pipeline_creation.name != nullptr ) {
+            resource_cache.programs.insert( hash_calculate( creation.pipeline_creation.name ), program );
+        }
+
+        program->references = 1;
+
+        return program;
+    }
+    return nullptr;
+}
+
+PipelineHandle Renderer::get_pipeline( Material* material ) {
+    RASSERT( material != nullptr );
+
+    return material->program->passes[ 0 ].pipeline;
+}
 
 // Renderer /////////////////////////////////////////////////////////////////////
 
@@ -399,5 +481,23 @@ void ResourceCache::shutdown( Renderer* renderer ) {
     buffers.shutdown();
     samplers.shutdown();
 }
+
+TextureResource* Renderer::create_texture( cstring name, cstring filename, bool create_mipmaps ) {
+    TextureResource* texture = textures.obtain();
+
+    if ( texture ) {
+        TextureHandle handle = create_texture_from_file( *gpu, filename, name, create_mipmaps );
+        texture->handle = handle;
+        gpu->query_texture( handle, texture->desc );
+        texture->references = 1;
+        texture->name = name;
+
+        resource_cache.textures.insert( hash_calculate( name ), texture );
+
+        return texture;
+    }
+    return nullptr;
+}
+
 
 } // namespace raptor

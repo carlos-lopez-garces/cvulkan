@@ -3479,4 +3479,302 @@ DeviceCreation& DeviceCreation::set_linear_allocator( StackAllocator* allocator 
     return *this;
 }
 
+PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, const char* cache_path ) {
+    PipelineHandle handle = { pipelines.obtain_resource() };
+    if ( handle.index == k_invalid_index ) {
+        return handle;
+    }
+
+    VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
+    VkPipelineCacheCreateInfo pipeline_cache_create_info { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+
+    bool cache_exists = file_exists( cache_path );
+    if ( cache_path != nullptr && cache_exists ) {
+        FileReadResult read_result = file_read_binary( cache_path, allocator );
+
+        VkPipelineCacheHeaderVersionOne* cache_header = (VkPipelineCacheHeaderVersionOne*)read_result.data;
+
+        if ( cache_header->deviceID == vulkan_physical_properties.deviceID &&
+             cache_header->vendorID == vulkan_physical_properties.vendorID &&
+             memcmp( cache_header->pipelineCacheUUID, vulkan_physical_properties.pipelineCacheUUID, VK_UUID_SIZE ) == 0 )
+        {
+            pipeline_cache_create_info.initialDataSize = read_result.size;
+            pipeline_cache_create_info.pInitialData = read_result.data;
+        }
+        else
+        {
+            cache_exists = false;
+        }
+
+        check( vkCreatePipelineCache( vulkan_device, &pipeline_cache_create_info, vulkan_allocation_callbacks, &pipeline_cache ) );
+
+        allocator->deallocate( read_result.data );
+    }
+    else {
+        check( vkCreatePipelineCache( vulkan_device, &pipeline_cache_create_info, vulkan_allocation_callbacks, &pipeline_cache ) );
+    }
+
+    ShaderStateHandle shader_state = create_shader_state( creation.shaders );
+    if ( shader_state.index == k_invalid_index ) {
+        // Shader did not compile.
+        pipelines.release_resource( handle.index );
+        handle.index = k_invalid_index;
+
+        return handle;
+    }
+
+    // Now that shaders have compiled we can create the pipeline.
+    Pipeline* pipeline = access_pipeline( handle );
+    ShaderState* shader_state_data = access_shader_state( shader_state );
+
+    pipeline->shader_state = shader_state;
+
+    VkDescriptorSetLayout vk_layouts[ k_max_descriptor_set_layouts ];
+
+    u32 num_active_layouts = shader_state_data->parse_result->set_count;
+
+    // Create VkPipelineLayout
+    for ( u32 l = 0; l < shader_state_data->parse_result->set_count; ++l ) {
+        pipeline->descriptor_set_layout_handle[ l ] = create_descriptor_set_layout( shader_state_data->parse_result->sets[ l ] );
+        pipeline->descriptor_set[ l ] = access_descriptor_set_layout( pipeline->descriptor_set_layout_handle[ l ] );
+
+        vk_layouts[ l ] = pipeline->descriptor_set[ l ]->vk_descriptor_set_layout;
+    }
+
+    // TODO: improve.
+    // Add bindless resource layout after other layouts.
+    // [TAG: BINDLESS]
+    u32 bindless_active = 0;
+    if ( bindless_supported ) {
+        vk_layouts[ num_active_layouts ] = vulkan_bindless_descriptor_layout;
+        bindless_active = 1;
+    }
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pipeline_layout_info.pSetLayouts = vk_layouts;
+    pipeline_layout_info.setLayoutCount = num_active_layouts + bindless_active;
+
+    VkPipelineLayout pipeline_layout;
+    check( vkCreatePipelineLayout( vulkan_device, &pipeline_layout_info, vulkan_allocation_callbacks, &pipeline_layout ) );
+    // Cache pipeline layout
+    pipeline->vk_pipeline_layout = pipeline_layout;
+    pipeline->num_active_layouts = num_active_layouts;
+
+    // Create full pipeline
+    if ( shader_state_data->graphics_pipeline ) {
+        VkGraphicsPipelineCreateInfo pipeline_info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+
+        //// Shader stage
+        pipeline_info.pStages = shader_state_data->shader_stage_info;
+        pipeline_info.stageCount = shader_state_data->active_shaders;
+        //// PipelineLayout
+        pipeline_info.layout = pipeline_layout;
+
+        //// Vertex input
+        VkPipelineVertexInputStateCreateInfo vertex_input_info = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+        // Vertex attributes.
+        VkVertexInputAttributeDescription vertex_attributes[ 8 ];
+        if ( creation.vertex_input.num_vertex_attributes ) {
+
+            for ( u32 i = 0; i < creation.vertex_input.num_vertex_attributes; ++i ) {
+                const VertexAttribute& vertex_attribute = creation.vertex_input.vertex_attributes[ i ];
+                vertex_attributes[ i ] = { vertex_attribute.location, vertex_attribute.binding, to_vk_vertex_format( vertex_attribute.format ), vertex_attribute.offset };
+            }
+
+            vertex_input_info.vertexAttributeDescriptionCount = creation.vertex_input.num_vertex_attributes;
+            vertex_input_info.pVertexAttributeDescriptions = vertex_attributes;
+        } else {
+            vertex_input_info.vertexAttributeDescriptionCount = 0;
+            vertex_input_info.pVertexAttributeDescriptions = nullptr;
+        }
+        // Vertex bindings
+        VkVertexInputBindingDescription vertex_bindings[ 8 ];
+        if ( creation.vertex_input.num_vertex_streams ) {
+            vertex_input_info.vertexBindingDescriptionCount = creation.vertex_input.num_vertex_streams;
+
+            for ( u32 i = 0; i < creation.vertex_input.num_vertex_streams; ++i ) {
+                const VertexStream& vertex_stream = creation.vertex_input.vertex_streams[ i ];
+                VkVertexInputRate vertex_rate = vertex_stream.input_rate == VertexInputRate::PerVertex ? VkVertexInputRate::VK_VERTEX_INPUT_RATE_VERTEX : VkVertexInputRate::VK_VERTEX_INPUT_RATE_INSTANCE;
+                vertex_bindings[ i ] = { vertex_stream.binding, vertex_stream.stride, vertex_rate };
+            }
+            vertex_input_info.pVertexBindingDescriptions = vertex_bindings;
+        } else {
+            vertex_input_info.vertexBindingDescriptionCount = 0;
+            vertex_input_info.pVertexBindingDescriptions = nullptr;
+        }
+
+        pipeline_info.pVertexInputState = &vertex_input_info;
+
+        //// Input Assembly
+        VkPipelineInputAssemblyStateCreateInfo input_assembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        input_assembly.primitiveRestartEnable = VK_FALSE;
+
+        pipeline_info.pInputAssemblyState = &input_assembly;
+
+        //// Color Blending
+        VkPipelineColorBlendAttachmentState color_blend_attachment[ 8 ];
+
+        if ( creation.blend_state.active_states ) {
+            for ( size_t i = 0; i < creation.blend_state.active_states; i++ ) {
+                const BlendState& blend_state = creation.blend_state.blend_states[ i ];
+
+                color_blend_attachment[ i ].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                color_blend_attachment[ i ].blendEnable = blend_state.blend_enabled ? VK_TRUE : VK_FALSE;
+                color_blend_attachment[ i ].srcColorBlendFactor = blend_state.source_color;
+                color_blend_attachment[ i ].dstColorBlendFactor = blend_state.destination_color;
+                color_blend_attachment[ i ].colorBlendOp = blend_state.color_operation;
+
+                if ( blend_state.separate_blend ) {
+                    color_blend_attachment[ i ].srcAlphaBlendFactor = blend_state.source_alpha;
+                    color_blend_attachment[ i ].dstAlphaBlendFactor = blend_state.destination_alpha;
+                    color_blend_attachment[ i ].alphaBlendOp = blend_state.alpha_operation;
+                } else {
+                    color_blend_attachment[ i ].srcAlphaBlendFactor = blend_state.source_color;
+                    color_blend_attachment[ i ].dstAlphaBlendFactor = blend_state.destination_color;
+                    color_blend_attachment[ i ].alphaBlendOp = blend_state.color_operation;
+                }
+            }
+        } else {
+            // Default non blended state
+            color_blend_attachment[ 0 ] = {};
+            color_blend_attachment[ 0 ].blendEnable = VK_FALSE;
+            color_blend_attachment[ 0 ].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        }
+
+        VkPipelineColorBlendStateCreateInfo color_blending{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        color_blending.logicOpEnable = VK_FALSE;
+        color_blending.logicOp = VK_LOGIC_OP_COPY; // Optional
+        color_blending.attachmentCount = creation.blend_state.active_states ? creation.blend_state.active_states : 1; // Always have 1 blend defined.
+        color_blending.pAttachments = color_blend_attachment;
+        color_blending.blendConstants[ 0 ] = 0.0f; // Optional
+        color_blending.blendConstants[ 1 ] = 0.0f; // Optional
+        color_blending.blendConstants[ 2 ] = 0.0f; // Optional
+        color_blending.blendConstants[ 3 ] = 0.0f; // Optional
+
+        pipeline_info.pColorBlendState = &color_blending;
+
+        //// Depth Stencil
+        VkPipelineDepthStencilStateCreateInfo depth_stencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+
+        depth_stencil.depthWriteEnable = creation.depth_stencil.depth_write_enable ? VK_TRUE : VK_FALSE;
+        depth_stencil.stencilTestEnable = creation.depth_stencil.stencil_enable ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthTestEnable = creation.depth_stencil.depth_enable ? VK_TRUE : VK_FALSE;
+        depth_stencil.depthCompareOp = creation.depth_stencil.depth_comparison;
+        if ( creation.depth_stencil.stencil_enable ) {
+            // TODO: add stencil
+            RASSERT( false );
+        }
+
+        pipeline_info.pDepthStencilState = &depth_stencil;
+
+        //// Multisample
+        VkPipelineMultisampleStateCreateInfo multisampling = {};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampling.minSampleShading = 1.0f; // Optional
+        multisampling.pSampleMask = nullptr; // Optional
+        multisampling.alphaToCoverageEnable = VK_FALSE; // Optional
+        multisampling.alphaToOneEnable = VK_FALSE; // Optional
+
+        pipeline_info.pMultisampleState = &multisampling;
+
+        //// Rasterizer
+        VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = creation.rasterization.cull_mode;
+        rasterizer.frontFace = creation.rasterization.front;
+        rasterizer.depthBiasEnable = VK_FALSE;
+        rasterizer.depthBiasConstantFactor = 0.0f; // Optional
+        rasterizer.depthBiasClamp = 0.0f; // Optional
+        rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
+
+        pipeline_info.pRasterizationState = &rasterizer;
+
+        //// Tessellation
+        pipeline_info.pTessellationState;
+
+
+        //// Viewport state
+        VkViewport viewport = {};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = ( float )swapchain_width;
+        viewport.height = ( float )swapchain_height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor = {};
+        scissor.offset = { 0, 0 };
+        scissor.extent = { swapchain_width, swapchain_height };
+
+        VkPipelineViewportStateCreateInfo viewport_state{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        viewport_state.viewportCount = 1;
+        viewport_state.pViewports = &viewport;
+        viewport_state.scissorCount = 1;
+        viewport_state.pScissors = &scissor;
+
+        pipeline_info.pViewportState = &viewport_state;
+
+        //// Render Pass
+        pipeline_info.renderPass = get_vulkan_render_pass( creation.render_pass, creation.name );
+
+        //// Dynamic states
+        VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dynamic_state{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dynamic_state.dynamicStateCount = ArraySize( dynamic_states );
+        dynamic_state.pDynamicStates = dynamic_states;
+
+        pipeline_info.pDynamicState = &dynamic_state;
+
+        check( vkCreateGraphicsPipelines( vulkan_device, pipeline_cache, 1, &pipeline_info, vulkan_allocation_callbacks, &pipeline->vk_pipeline ) );
+
+        pipeline->vk_bind_point = VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
+    } else {
+        VkComputePipelineCreateInfo pipeline_info{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+
+        pipeline_info.stage = shader_state_data->shader_stage_info[ 0 ];
+        pipeline_info.layout = pipeline_layout;
+
+        check( vkCreateComputePipelines( vulkan_device, pipeline_cache, 1, &pipeline_info, vulkan_allocation_callbacks, &pipeline->vk_pipeline ) );
+
+        pipeline->vk_bind_point = VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE;
+    }
+
+    if ( cache_path != nullptr && !cache_exists ) {
+        sizet cache_data_size = 0;
+        check( vkGetPipelineCacheData( vulkan_device, pipeline_cache, &cache_data_size, nullptr ) );
+
+        void* cache_data = allocator->allocate( cache_data_size, 64 );
+        check( vkGetPipelineCacheData( vulkan_device, pipeline_cache, &cache_data_size, cache_data ) );
+
+        file_write_binary( cache_path, cache_data, cache_data_size );
+
+        allocator->deallocate( cache_data );
+    }
+
+    vkDestroyPipelineCache( vulkan_device, pipeline_cache, vulkan_allocation_callbacks );
+
+    return handle;
+}
+
+DescriptorSetLayoutHandle GpuDevice::get_descriptor_set_layout( PipelineHandle pipeline_handle, int layout_index ) {
+    Pipeline* pipeline = access_pipeline( pipeline_handle );
+    RASSERT( pipeline != nullptr );
+
+    return  pipeline->descriptor_set_layout_handle[ layout_index ];
+}
+
+DescriptorSetLayoutHandle GpuDevice::get_descriptor_set_layout( PipelineHandle pipeline_handle, int layout_index ) const {
+    const Pipeline* pipeline = access_pipeline( pipeline_handle );
+    RASSERT( pipeline != nullptr );
+
+    return  pipeline->descriptor_set_layout_handle[ layout_index ];
+}
+
 } // namespace raptor

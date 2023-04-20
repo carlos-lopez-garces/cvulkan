@@ -489,5 +489,40 @@ void CommandBuffer::pop_marker() {
     device->pop_marker( vk_command_buffer );
 }
 
+void CommandBuffer::bind_local_descriptor_set( DescriptorSetHandle* handles, u32 num_lists, u32* offsets, u32 num_offsets ) {
+
+    // TODO:
+    u32 offsets_cache[ 8 ];
+    num_offsets = 0;
+
+    for ( u32 l = 0; l < num_lists; ++l ) {
+        DesciptorSet* descriptor_set = ( DesciptorSet* )descriptor_sets.access_resource( handles[ l ].index );
+        vk_descriptor_sets[l] = descriptor_set->vk_descriptor_set;
+
+        // Search for dynamic buffers
+        const DesciptorSetLayout* descriptor_set_layout = descriptor_set->layout;
+        for ( u32 i = 0; i < descriptor_set_layout->num_bindings; ++i ) {
+            const DescriptorBinding& rb = descriptor_set_layout->bindings[ i ];
+
+            if ( rb.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ) {
+                // Search for the actual buffer offset
+                const u32 resource_index = descriptor_set->bindings[ i ];
+                ResourceHandle buffer_handle = descriptor_set->resources[ resource_index ];
+                Buffer* buffer = gpu_device->access_buffer( { buffer_handle } );
+
+                offsets_cache[ num_offsets++ ] = buffer->global_offset;
+            }
+        }
+    }
+
+    const u32 k_first_set = 0;
+    vkCmdBindDescriptorSets( vk_command_buffer, current_pipeline->vk_bind_point, current_pipeline->vk_pipeline_layout, k_first_set,
+                             num_lists, vk_descriptor_sets, num_offsets, offsets_cache );
+
+    if ( gpu_device->bindless_supported ) {
+        vkCmdBindDescriptorSets( vk_command_buffer, current_pipeline->vk_bind_point, current_pipeline->vk_pipeline_layout, 1,
+                                 1, &gpu_device->vulkan_bindless_descriptor_set, 0, nullptr );
+    }
+}
 
 } // namespace raptor
