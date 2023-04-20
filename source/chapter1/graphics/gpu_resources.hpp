@@ -9,10 +9,6 @@
 
 namespace raptor {
 
-namespace spirv {
-    struct ParseResult;
-}
-
 struct Allocator;
 
 static const u32                    k_invalid_index = 0xffffffff;
@@ -728,8 +724,6 @@ struct ShaderState {
 
     u32                             active_shaders = 0;
     bool                            graphics_pipeline = false;
-
-    spirv::ParseResult*             parse_result;
 }; // struct ShaderStateVulkan
 
 //

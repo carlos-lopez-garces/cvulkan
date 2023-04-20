@@ -355,10 +355,6 @@ struct GpuDevice : public Service {
     RenderPass*               access_render_pass( RenderPassHandle render_pass );
     const RenderPass*         access_render_pass( RenderPassHandle render_pass ) const;
 
-    PipelineHandle                  create_pipeline( const PipelineCreation& creation, const char* cache_path = nullptr );
-
-    DescriptorSetLayoutHandle get_descriptor_set_layout( PipelineHandle pipeline_handle, int layout_index );
-    DescriptorSetLayoutHandle get_descriptor_set_layout( PipelineHandle pipeline_handle, int layout_index ) const;
 
 }; // struct Device
 

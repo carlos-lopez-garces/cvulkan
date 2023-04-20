@@ -48,61 +48,6 @@ struct SamplerResource : public raptor::Resource {
 
 }; // struct Sampler
 
-struct ProgramCreation {
-
-    // NOTE(marco): not much benefit having this abstraction for now,
-    // but it will become more powerful soon
-    PipelineCreation                pipeline_creation;
-
-};
-
-struct ProgramPass {
-
-    PipelineHandle                  pipeline;
-    DescriptorSetLayoutHandle       descriptor_set_layout;
-};
-
-struct Program : public raptor::Resource {
-
-    u32                             get_num_passes() const;
-
-    Array<ProgramPass>              passes;
-
-    u32                             pool_index;
-
-    static constexpr cstring        k_type = "raptor_program_type";
-    static u64                      k_type_hash;
-
-};
-
-struct MaterialCreation {
-
-    MaterialCreation&               reset();
-    MaterialCreation&               set_program( Program* program );
-    MaterialCreation&               set_name( cstring name );
-    MaterialCreation&               set_render_index( u32 render_index );
-
-    Program*                        program          = nullptr;
-    cstring                         name             = nullptr;
-    u32                             render_index     = ~0u;
-
-}; // struct MaterialCreation
-
-//
-//
-struct Material : public raptor::Resource {
-
-    Program*                        program;
-
-    u32                             render_index;
-
-    u32                             pool_index;
-
-    static constexpr cstring        k_type = "raptor_material_type";
-    static u64                      k_type_hash;
-
-}; // struct Material
-
 // ResourceCache ////////////////////////////////////////////////////////////////
 
 //
@@ -115,7 +60,6 @@ struct ResourceCache {
     FlatHashMap<u64, TextureResource*> textures;
     FlatHashMap<u64, BufferResource*>  buffers;
     FlatHashMap<u64, SamplerResource*> samplers;
-    FlatHashMap<u64, Program*>         programs;
 
 }; // struct ResourceCache
 
@@ -154,14 +98,8 @@ struct Renderer : public Service {
 
     TextureResource*            create_texture( const TextureCreation& creation );
     TextureResource*            create_texture( cstring name, cstring filename );
-    TextureResource*            create_texture( cstring name, cstring filename, bool create_mipmaps );
 
     SamplerResource*            create_sampler( const SamplerCreation& creation );
-
-    Material*                   create_material( const MaterialCreation& creation );
-    Material*                   create_material( Program* program, cstring name );
-
-    DescriptorSetHandle         create_descriptor_set( CommandBuffer* gpu_commands, Material* material, DescriptorSetCreation& ds_creation );
 
     void                        destroy_buffer( BufferResource* buffer );
     void                        destroy_texture( TextureResource* texture );
@@ -186,11 +124,6 @@ struct Renderer : public Service {
     u16                         height;
 
     static constexpr cstring    k_name = "raptor_rendering_service";
-
-    Program*                    create_program( const ProgramCreation& creation );
-    ResourcePoolTyped<Program>          programs;
-
-    PipelineHandle              get_pipeline( Material* material );
 
 }; // struct Renderer
 
