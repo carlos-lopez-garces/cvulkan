@@ -276,9 +276,11 @@ struct GpuDevice : public Service {
     VkDevice                        vulkan_device;
     VkQueue                         vulkan_queue;
     uint32_t                        vulkan_queue_family;
+
+    // Regular descriptor pool.
     VkDescriptorPool                vulkan_descriptor_pool;
 
-    // [TAG: BINDLESS]
+    // Bindless descriptor pool.
     VkDescriptorPool                vulkan_bindless_descriptor_pool;
     VkDescriptorSetLayout           vulkan_bindless_descriptor_layout;      // Global bindless descriptor layout.
     VkDescriptorSet                 vulkan_bindless_descriptor_set;         // Global bindless descriptor set.

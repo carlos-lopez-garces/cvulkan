@@ -232,7 +232,7 @@ static raptor::FlatHashMap<u64, VkRenderPass> render_pass_cache;
 static CommandBufferRing command_buffer_ring;
 
 static sizet            s_ubo_alignment = 256;
-static sizet            s_ssbo_alignemnt = 256;
+static sizet            s_ssbo_alignment = 256;
 
 static const u32        k_bindless_texture_binding = 10;
 static const u32        k_max_bindless_resources = 1024;
@@ -329,7 +329,7 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     rprint( "GPU Used: %s\n", vulkan_physical_properties.deviceName );
 
     s_ubo_alignment = vulkan_physical_properties.limits.minUniformBufferOffsetAlignment;
-    s_ssbo_alignemnt = vulkan_physical_properties.limits.minStorageBufferOffsetAlignment;
+    s_ssbo_alignment = vulkan_physical_properties.limits.minStorageBufferOffsetAlignment;
 
     // Check if the VK_EXT_descriptor_indexing extension is supported. This extension
     // allows us to do bindless rendering.
@@ -488,7 +488,8 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     result = vmaCreateAllocator( &allocatorInfo, &vma_allocator );
     check( result );
 
-    ////////  Create Descriptor Pools
+    // Create regular descriptor pools. Unlike bindless descriptor pools, these
+    // descriptors cannot be updated after they have been bound.
     static const u32 k_global_pool_elements = 128;
     VkDescriptorPoolSize pool_sizes[] =
     {
@@ -507,83 +508,38 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = k_global_pool_elements * ArraySize( pool_sizes );
-    pool_info.poolSizeCount = ( u32 )ArraySize( pool_sizes );
+    pool_info.maxSets = k_global_pool_elements * ArraySize(pool_sizes);
+    pool_info.poolSizeCount = (u32) ArraySize(pool_sizes);
     pool_info.pPoolSizes = pool_sizes;
-    result = vkCreateDescriptorPool( vulkan_device, &pool_info, vulkan_allocation_callbacks, &vulkan_descriptor_pool );
-    check( result );
+    result = vkCreateDescriptorPool(vulkan_device, &pool_info, vulkan_allocation_callbacks, &vulkan_descriptor_pool);
+    check(result);
 
-    // [TAG: BINDLESS]
-    // Create the Descriptor Pool used by bindless, that needs update after bind flag.
-    if ( bindless_supported ) {
-        VkDescriptorPoolSize pool_sizes_bindless[] =
-        {
+    // Create bindless descriptor pools, if supported.
+    if (bindless_supported) {
+        // The bindless feature allows us to allocate descriptor sets that support updating
+        // the content of textures after they are bound.
+
+        VkDescriptorPoolSize pool_sizes_bindless[] = {
+            // { VkDescriptorType type, descriptorCount }. 
+            // 2 types of descriptors, k_max_bindless_resources of each.
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_max_bindless_resources },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, k_max_bindless_resources },
         };
 
-        // Update after bind is needed here, for each binding and in the descriptor set layout creation.
+        // This flag is provided by the VK_EXT_descriptor_indexing feature.
         pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT_EXT;
-        pool_info.maxSets = k_max_bindless_resources * ArraySize( pool_sizes_bindless );
-        pool_info.poolSizeCount = ( u32 )ArraySize( pool_sizes_bindless );
+        pool_info.maxSets = k_max_bindless_resources * ArraySize(pool_sizes_bindless);
+        pool_info.poolSizeCount = (u32) ArraySize(pool_sizes_bindless);
         pool_info.pPoolSizes = pool_sizes_bindless;
-        result = vkCreateDescriptorPool( vulkan_device, &pool_info, vulkan_allocation_callbacks, &vulkan_bindless_descriptor_pool);
-        check( result );
-
-        const u32 pool_count = ( u32 )ArraySize( pool_sizes_bindless );
-        VkDescriptorSetLayoutBinding vk_binding[ 4 ];
-
-        // Actual descriptor set layout
-        VkDescriptorSetLayoutBinding& image_sampler_binding = vk_binding[ 0 ];
-        image_sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        image_sampler_binding.descriptorCount = k_max_bindless_resources;
-        image_sampler_binding.binding = k_bindless_texture_binding;
-        image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
-        image_sampler_binding.pImmutableSamplers = nullptr;
-
-        VkDescriptorSetLayoutBinding& storage_image_binding = vk_binding[ 1 ];
-        storage_image_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        storage_image_binding.descriptorCount = k_max_bindless_resources;
-        storage_image_binding.binding = k_bindless_texture_binding + 1;
-        storage_image_binding.stageFlags = VK_SHADER_STAGE_ALL;
-        storage_image_binding.pImmutableSamplers = nullptr;
-
-        VkDescriptorSetLayoutCreateInfo layout_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        layout_info.bindingCount = pool_count;
-        layout_info.pBindings = vk_binding;
-        layout_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT_EXT;
-
-        // TODO: reenable variable descriptor count
-        // Binding flags
-        VkDescriptorBindingFlags bindless_flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT_EXT | /*VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT |*/ VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT_EXT;
-        VkDescriptorBindingFlags binding_flags[ 4 ];
-
-        binding_flags[ 0 ] = bindless_flags;
-        binding_flags[ 1 ] = bindless_flags;
-
-        VkDescriptorSetLayoutBindingFlagsCreateInfoEXT extended_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT, nullptr };
-        extended_info.bindingCount = pool_count;
-        extended_info.pBindingFlags = binding_flags;
-
-        layout_info.pNext = &extended_info;
-
-        vkCreateDescriptorSetLayout( vulkan_device, &layout_info, vulkan_allocation_callbacks, &vulkan_bindless_descriptor_layout );
-
-        VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-        alloc_info.descriptorPool = vulkan_bindless_descriptor_pool;
-        alloc_info.descriptorSetCount = 1;
-        alloc_info.pSetLayouts = &vulkan_bindless_descriptor_layout;
-
-        VkDescriptorSetVariableDescriptorCountAllocateInfoEXT count_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO_EXT };
-        u32 max_binding = k_max_bindless_resources - 1;
-        count_info.descriptorSetCount = 1;
-        // This number is the max allocatable count
-        count_info.pDescriptorCounts = &max_binding;
-        //alloc_info.pNext = &count_info;
-
-        check_result( vkAllocateDescriptorSets( vulkan_device, &alloc_info, &vulkan_bindless_descriptor_set ) );
+        result = vkCreateDescriptorPool(
+            vulkan_device,
+            &pool_info,
+            vulkan_allocation_callbacks,
+            // Class instance member.
+            &vulkan_bindless_descriptor_pool
+        );
+        check(result);
     }
-
 
     // Create timestamp query pool used for GPU timings.
     VkQueryPoolCreateInfo vqpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0, VK_QUERY_TYPE_TIMESTAMP, creation.gpu_time_queries_per_frame * 2u * k_max_frames, 0 };
