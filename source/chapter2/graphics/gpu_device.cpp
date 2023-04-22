@@ -568,12 +568,12 @@ void GpuDevice::init( const DeviceCreation& creation ) {
 
         // TODO: what does this binding bind and to what?
         VkDescriptorSetLayoutBinding &storage_image_binding = vk_binding[1];
-        image_sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        image_sampler_binding.descriptorCount = k_max_bindless_resources;
+        storage_image_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        storage_image_binding.descriptorCount = k_max_bindless_resources;
         // TODO: in which shader is this binding?
-        image_sampler_binding.binding = k_bindless_texture_binding + 1;
-        image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
-        image_sampler_binding.pImmutableSamplers = nullptr;
+        storage_image_binding.binding = k_bindless_texture_binding + 1;
+        storage_image_binding.stageFlags = VK_SHADER_STAGE_ALL;
+        storage_image_binding.pImmutableSamplers = nullptr;
 
         // Populate creation struct for the descriptor set layout. This struct is later extended
         // with a chained VkDescriptorSetLayoutBindingFlagsCreateInfoEXT struct that configures
@@ -614,13 +614,13 @@ void GpuDevice::init( const DeviceCreation& creation ) {
         // Each individual descriptor binding is specified by a descriptor type, a count (array size)
         // of the number of descriptors in the binding, a set of shader stages that can access the
         // binding, and (if using immutable samplers) an array of sampler descriptors.
-        vkCreateDescriptorSetLayout(
+        check_result(vkCreateDescriptorSetLayout(
             vulkan_device,
             &layout_info,
             vulkan_allocation_callbacks,
             // Class instance member.
             &vulkan_bindless_descriptor_layout
-        );
+        ));
 
         // Allocate a descriptor set in the pool that follows the layout we just built. 
         VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -877,10 +877,18 @@ void GpuDevice::shutdown() {
     vkDestroyDebugUtilsMessengerEXT( vulkan_instance, vulkan_debug_utils_messenger, vulkan_allocation_callbacks );
 #endif // IMGUI_VULKAN_DEBUG_REPORT
 
-    // [TAG: BINDLESS]
-    if ( bindless_supported ) {
-        vkDestroyDescriptorSetLayout( vulkan_device, vulkan_bindless_descriptor_layout, vulkan_allocation_callbacks );
-        vkDestroyDescriptorPool( vulkan_device, vulkan_bindless_descriptor_pool, vulkan_allocation_callbacks );
+    if (bindless_supported) {
+        vkDestroyDescriptorSetLayout(
+            vulkan_device,
+            vulkan_bindless_descriptor_layout,
+            vulkan_allocation_callbacks
+        );
+
+        vkDestroyDescriptorPool(
+            vulkan_device,
+            vulkan_bindless_descriptor_pool,
+            vulkan_allocation_callbacks
+        );
     }
 
     vkDestroyDescriptorPool( vulkan_device, vulkan_descriptor_pool, vulkan_allocation_callbacks );
@@ -1383,12 +1391,9 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, con
         vk_layouts[ l ] = pipeline->descriptor_set[ l ]->vk_descriptor_set_layout;
     }
 
-    // TODO: improve.
-    // Add bindless resource layout after other layouts.
-    // [TAG: BINDLESS]
     u32 bindless_active = 0;
-    if ( bindless_supported ) {
-        vk_layouts[ num_active_layouts ] = vulkan_bindless_descriptor_layout;
+    if (bindless_supported) {
+        vk_layouts[num_active_layouts] = vulkan_bindless_descriptor_layout;
         bindless_active = 1;
     }
 
@@ -1731,9 +1736,9 @@ DescriptorSetLayoutHandle GpuDevice::create_descriptor_set_layout( const Descrip
         binding.type = input_binding.type;
         binding.name = input_binding.name;
 
-        // [TAG: BINDLESS]
-        // Skip bindings for images and textures as they are bindless, thus bound in the global bindless arrays (one for images, one for textures).
-        if ( bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ) {
+        // Is this where resourced are bound? If so, we don't bid bindless textures; those 
+        // are bound in the global bindless arrays.
+        if (bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
             continue;
         }
 
@@ -1775,9 +1780,9 @@ void GpuDevice::fill_write_descriptor_sets( GpuDevice& gpu, const DesciptorSetLa
 
         const DescriptorBinding& binding = descriptor_set_layout->bindings[ layout_binding_index ];
 
-        // [TAG: BINDLESS]
-        // Skip bindless descriptors as they are bound in the global bindless arrays.
-        if ( gpu.bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ) {
+        // Is this where resourced are bound? If so, we don't bid bindless textures; those 
+        // are bound in the global bindless arrays.
+        if (gpu.bindless_supported && (binding.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || binding.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)) {
             continue;
         }
 
