@@ -234,6 +234,11 @@ static CommandBufferRing command_buffer_ring;
 static sizet            s_ubo_alignment = 256;
 static sizet            s_ssbo_alignment = 256;
 
+// See
+//
+//  layout ( set = 1, binding = 10 ) uniform sampler2D global_textures[];
+//
+// in the fragment shader.
 static const u32        k_bindless_texture_binding = 10;
 static const u32        k_max_bindless_resources = 1024;
 
@@ -539,6 +544,36 @@ void GpuDevice::init( const DeviceCreation& creation ) {
             &vulkan_bindless_descriptor_pool
         );
         check(result);
+
+        // pool_sizes_bindless contains one entry per pool, each entry specifies the maximum
+        // number of descriptors that can be allocated in the corresponding pool.
+        const u32 pool_count = (u32) ArraySize(pool_sizes_bindless);
+
+        // Create descriptor set layouts.
+        VkDescriptorSetLayoutBinding vk_binding[4];
+
+        // Populate each entry of vk_binding.
+
+        // Global array of textures binding.
+        VkDescriptorSetLayoutBinding &image_sampler_binding = vk_binding[0];
+        // Corresponds to one of the types of bindless pools specified in pool_sizes_bindless.
+        image_sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        image_sampler_binding.descriptorCount = k_max_bindless_resources;
+        // A binding number marks the variable in shader code that is used to access a given
+        // resource. k_bindless_texture_binding identifies the binding of a global array of textures
+        // to shader stages. k_bindless_texture_binding is used in the fragment shader.
+        image_sampler_binding.binding = k_bindless_texture_binding;
+        image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
+        image_sampler_binding.pImmutableSamplers = nullptr;
+
+        // TODO: what does this binding bind and to what?
+        VkDescriptorSetLayoutBinding &storage_image_binding = vk_binding[1];
+        image_sampler_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        image_sampler_binding.descriptorCount = k_max_bindless_resources;
+        // TODO: in which shader is this binding?
+        image_sampler_binding.binding = k_bindless_texture_binding + 1;
+        image_sampler_binding.stageFlags = VK_SHADER_STAGE_ALL;
+        image_sampler_binding.pImmutableSamplers = nullptr;
     }
 
     // Create timestamp query pool used for GPU timings.
