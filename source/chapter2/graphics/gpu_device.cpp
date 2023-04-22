@@ -331,17 +331,24 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     s_ubo_alignment = vulkan_physical_properties.limits.minUniformBufferOffsetAlignment;
     s_ssbo_alignemnt = vulkan_physical_properties.limits.minStorageBufferOffsetAlignment;
 
-    // [TAG: BINDLESS]
-    // Query bindless extension, called Descriptor Indexing (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/man/html/VK_EXT_descriptor_indexing.html)
-    VkPhysicalDeviceDescriptorIndexingFeatures indexing_features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES, nullptr };
-    VkPhysicalDeviceFeatures2 device_features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &indexing_features };
-
-    vkGetPhysicalDeviceFeatures2( vulkan_physical_device, &device_features );
-    // For the feature to be correctly working, we need both the possibility to partially bind a descriptor,
-    // as some entries in the bindless array will be empty, and SpirV runtime descriptors.
+    // Check if the VK_EXT_descriptor_indexing extension is supported. This extension
+    // allows us to do bindless rendering.
+    VkPhysicalDeviceDescriptorIndexingFeatures indexing_features {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
+        // pNext.
+        nullptr
+        // A bunch of VkBool32 fields follow, corresponding to individual features. A
+        // vkGetPhysicalDeviceFeatures2 call populates each field telling whether the
+        // feature is supported.
+    };
+    VkPhysicalDeviceFeatures2 device_features {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        // pNext. Extends this struct with a VkPhysicalDeviceDescriptorIndexingFeatures struct.
+        &indexing_features
+    };
+    // Reports capabilities of a physical device.
+    vkGetPhysicalDeviceFeatures2(vulkan_physical_device, &device_features);
     bindless_supported = indexing_features.descriptorBindingPartiallyBound && indexing_features.runtimeDescriptorArray;
-    // TODO: remove when finished with bindless
-    //bindless_supported = false;
 
     //////// Create logical device
     u32 queue_family_count = 0;
