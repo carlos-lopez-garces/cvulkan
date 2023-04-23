@@ -906,9 +906,14 @@ void GpuDevice::shutdown() {
     rprint( "Gpu Device shutdown\n" );
 }
 
-// Resource Creation ////////////////////////////////////////////////////////////
-static void vulkan_create_texture( GpuDevice& gpu, const TextureCreation& creation, TextureHandle handle, Texture* texture ) {
-
+// Creates a texture.
+static void vulkan_create_texture(
+    GpuDevice& gpu,
+    const TextureCreation &creation,
+    TextureHandle handle,
+    // Supplied by caller. (This is an input, not an output.)
+    Texture* texture
+) {
     texture->width = creation.width;
     texture->height = creation.height;
     texture->depth = creation.depth;
@@ -918,14 +923,13 @@ static void vulkan_create_texture( GpuDevice& gpu, const TextureCreation& creati
     texture->vk_format = creation.format;
     texture->sampler = nullptr;
     texture->flags = creation.flags;
-
     texture->handle = handle;
 
-    //// Create the image
+    // Create the image.
     VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     image_info.format = texture->vk_format;
     image_info.flags = 0;
-    image_info.imageType = to_vk_image_type( creation.type );
+    image_info.imageType = to_vk_image_type(creation.type);
     image_info.extent.width = creation.width;
     image_info.extent.height = creation.height;
     image_info.extent.depth = creation.depth;
@@ -934,54 +938,64 @@ static void vulkan_create_texture( GpuDevice& gpu, const TextureCreation& creati
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
 
-    const bool is_render_target = ( creation.flags & TextureFlags::RenderTarget_mask ) == TextureFlags::RenderTarget_mask;
-    const bool is_compute_used = ( creation.flags & TextureFlags::Compute_mask ) == TextureFlags::Compute_mask;
+    const bool is_render_target = (creation.flags & TextureFlags::RenderTarget_mask) == TextureFlags::RenderTarget_mask;
+    const bool is_compute_used = (creation.flags & TextureFlags::Compute_mask) == TextureFlags::Compute_mask;
 
-    // Default to always readable from shader.
+    // Can be sampled by a shader.
     image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-
+    // TODO: ?
     image_info.usage |= is_compute_used ? VK_IMAGE_USAGE_STORAGE_BIT : 0;
 
-    if ( TextureFormat::has_depth_or_stencil( creation.format ) ) {
-        // Depth/Stencil textures are normally textures you render into.
+    if (TextureFormat::has_depth_or_stencil(creation.format)) {
+        // Image can be used to create a VkImageView suitable for use as a depth/stencil or
+        // depth/stencil resolve attachment in a VkFramebuffer.
         image_info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-
     } else {
-        image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // TODO
+        // Image can be used to create a VkImageView suitable for use as a depth/stencil or
+        // depth/stencil resolve attachment in a VkFramebuffer.
+        image_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // Image can be used to create a VkImageView suitable for use as a color or resolve
+        // attachment in a VkFramebuffer.
         image_info.usage |= is_render_target ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0;
     }
 
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    // Create image using the Vulkan Memory Allocator. See https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/index.html.
     VmaAllocationCreateInfo memory_info{};
+    // TODO: this usage type is obsolete; use VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT instead.
     memory_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    check(vmaCreateImage(
+        gpu.vma_allocator,
+        &image_info,
+        &memory_info,
+        &texture->vk_image,
+        &texture->vma_allocation,
+        nullptr
+    ));
+    gpu.set_resource_name(VK_OBJECT_TYPE_IMAGE, (u64) texture->vk_image, creation.name);
 
-    check( vmaCreateImage( gpu.vma_allocator, &image_info, &memory_info,
-                           &texture->vk_image, &texture->vma_allocation, nullptr ) );
-
-    gpu.set_resource_name( VK_OBJECT_TYPE_IMAGE, ( u64 )texture->vk_image, creation.name );
-
-    //// Create the image view
+    // Create image view. An image view describes how to access the image and which part
+    // of the image to access.
     VkImageViewCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     info.image = texture->vk_image;
-    info.viewType = to_vk_image_view_type( creation.type );
+    info.viewType = to_vk_image_view_type(creation.type);
     info.format = image_info.format;
-
-    if ( TextureFormat::has_depth_or_stencil( creation.format ) ) {
-
-        info.subresourceRange.aspectMask = TextureFormat::has_depth( creation.format ) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0;
-        // TODO:gs
-        //info.subresourceRange.aspectMask |= TextureFormat::has_stencil( creation.format ) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0;
+    if (TextureFormat::has_depth_or_stencil(creation.format)) {
+        info.subresourceRange.aspectMask = TextureFormat::has_depth(creation.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0;
     } else {
         info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     }
-
     info.subresourceRange.levelCount = creation.mipmaps;
     info.subresourceRange.layerCount = 1;
-    check( vkCreateImageView( gpu.vulkan_device, &info, gpu.vulkan_allocation_callbacks, &texture->vk_image_view ) );
-
-    gpu.set_resource_name( VK_OBJECT_TYPE_IMAGE_VIEW, ( u64 )texture->vk_image_view, creation.name );
+    check(vkCreateImageView(
+        gpu.vulkan_device,
+        &info,
+        gpu.vulkan_allocation_callbacks,
+        &texture->vk_image_view
+    ));
+    gpu.set_resource_name(VK_OBJECT_TYPE_IMAGE_VIEW, (u64) texture->vk_image_view, creation.name);
 
     texture->vk_image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
