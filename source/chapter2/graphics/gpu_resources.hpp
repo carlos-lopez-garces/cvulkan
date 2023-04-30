@@ -287,8 +287,8 @@ struct ShaderStateCreation {
 
 }; // struct ShaderStateCreation
 
-//
-//
+// spirv::parse_binary automates the creation of DescriptorSetLayoutCreations out of
+// SPIR-V shaders.
 struct DescriptorSetLayoutCreation {
 
     //

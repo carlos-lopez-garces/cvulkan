@@ -493,8 +493,12 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     result = vmaCreateAllocator( &allocatorInfo, &vma_allocator );
     check( result );
 
-    // Create regular descriptor pools. Unlike bindless descriptor pools, these
-    // descriptors cannot be updated after they have been bound.
+    // Create regular descriptor pools. A VkDescriptorPool is compartmentalized by 
+    // type of descriptor. We'll have a pool for each possible type of descriptor
+    // and all of them will be of the same size, k_global_pool_elements.
+    //
+    // Unlike bindless descriptor pools, these descriptors cannot be updated after
+    // they have been bound.
     static const u32 k_global_pool_elements = 128;
     VkDescriptorPoolSize pool_sizes[] =
     {
@@ -1255,92 +1259,106 @@ VkShaderModuleCreateInfo GpuDevice::compile_shader( cstring code, u32 code_size,
     return shader_create_info;
 }
 
-ShaderStateHandle GpuDevice::create_shader_state( const ShaderStateCreation& creation ) {
-
+ShaderStateHandle GpuDevice::create_shader_state(const ShaderStateCreation &creation) {
     ShaderStateHandle handle = { k_invalid_index };
 
-    if ( creation.stages_count == 0 || creation.stages == nullptr ) {
-        rprint( "Shader %s does not contain shader stages.\n", creation.name );
+    if (creation.stages_count == 0 || creation.stages == nullptr) {
+        rprint("Shader %s does not contain shader stages.\n", creation.name);
         return handle;
     }
 
+    // Shaders are resources and, as such, must be allocated in the shaders ResourcePool.
+    // The returned index corresponds to a free ShaderState from the pool.
     handle.index = shaders.obtain_resource();
-    if ( handle.index == k_invalid_index ) {
+    if (handle.index == k_invalid_index) {
+        // There isn't room in the shaders ResourcePool.
         return handle;
     }
 
-    // For each shader stage, compile them individually.
-    u32 compiled_shaders = 0;
-
-    ShaderState* shader_state = access_shader_state( handle );
+    // Get the reserved ShaderState.
+    ShaderState *shader_state = access_shader_state(handle);
     shader_state->graphics_pipeline = true;
     shader_state->active_shaders = 0;
 
     sizet current_temporary_marker = temporary_allocator->get_marker();
 
     StringBuffer name_buffer;
-    name_buffer.init( 4096, temporary_allocator );
+    name_buffer.init(4096, temporary_allocator);
 
-    // Parse result needs to be always in memory as its used to free descriptor sets.
-    shader_state->parse_result = ( spirv::ParseResult* )allocator->allocate( sizeof( spirv::ParseResult ), 64 );
-    memset( shader_state->parse_result, 0, sizeof( spirv::ParseResult ) );
+    // Allocate memory for the SPIR-V ParseResult and keep it around: we'll need it
+    // later to free descriptor sets.
+    shader_state->parse_result = (spirv::ParseResult *) allocator->allocate(sizeof(spirv::ParseResult), 64);
+    memset(shader_state->parse_result, 0, sizeof(spirv::ParseResult));
 
-    for ( compiled_shaders = 0; compiled_shaders < creation.stages_count; ++compiled_shaders ) {
-        const ShaderStage& stage = creation.stages[ compiled_shaders ];
+    // Compile each of the shaders into SPIR-V (if need be; the input shaders may already be in
+    // SPIR-V format) and then parse the SPIR-V code to obtain the descriptor set layout of the
+    // shader (the creation of descriptor set layouts is automated this way). 
+    //
+    // Then create the corresponding Vulkan modules.
+    u32 compiled_shaders = 0;
+    for (compiled_shaders = 0; compiled_shaders < creation.stages_count; ++compiled_shaders) {
+        const ShaderStage &stage = creation.stages[compiled_shaders];
 
-        // Gives priority to compute: if any is present (and it should not be) then it is not a graphics pipeline.
-        if ( stage.type == VK_SHADER_STAGE_COMPUTE_BIT ) {
+        if (stage.type == VK_SHADER_STAGE_COMPUTE_BIT) {
             shader_state->graphics_pipeline = false;
         }
 
+        // Vulkan shader modules are SPIR-V modules. Modules contain 1 or more shaders.
         VkShaderModuleCreateInfo shader_create_info = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-
-        if ( creation.spv_input ) {
+        if (creation.spv_input) {
+            // The shaders were given already in SPIR-V format.
             shader_create_info.codeSize = stage.code_size;
-            shader_create_info.pCode = reinterpret_cast< const u32* >( stage.code );
+            shader_create_info.pCode = reinterpret_cast<const u32*>(stage.code);
         } else {
-            shader_create_info = compile_shader( stage.code, stage.code_size, stage.type, creation.name );
+            // Compile GLSL (or even HLSL) shader code into SPIR-V, by executing glslangValidator.exe.
+            shader_create_info = compile_shader(stage.code, stage.code_size, stage.type, creation.name);
         }
 
-        // Compile shader module
+        
         VkPipelineShaderStageCreateInfo& shader_stage_info = shader_state->shader_stage_info[ compiled_shaders ];
         memset( &shader_stage_info, 0, sizeof( VkPipelineShaderStageCreateInfo ) );
         shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         shader_stage_info.pName = "main";
         shader_stage_info.stage = stage.type;
 
-        if ( vkCreateShaderModule( vulkan_device, &shader_create_info, nullptr, &shader_state->shader_stage_info[ compiled_shaders ].module ) != VK_SUCCESS ) {
-
+        // Create VkShaderModule and store it in the ShaderState (in the device's shaders ResourcePool).
+        if (vkCreateShaderModule(
+            vulkan_device,
+            &shader_create_info,
+            nullptr,
+            &shader_state->shader_stage_info[compiled_shaders].module
+        ) != VK_SUCCESS) {
             break;
         }
 
-        spirv::parse_binary( shader_create_info.pCode, shader_create_info.codeSize, name_buffer, shader_state->parse_result );
-        // Not needed anymore - temp allocator freed at the end.
-        //if ( compiled ) {
-        //    rfree( ( void* )createInfo.pCode, allocator );
-        //}
+        // Parse the SPIR-V code to obtain the descriptor set layout. The result is kept
+        // around in the ShaderState (in the device's shaders ResourcePool).
+        spirv::parse_binary(
+            shader_create_info.pCode,
+            shader_create_info.codeSize,
+            name_buffer,
+            shader_state->parse_result
+        );
 
-        set_resource_name( VK_OBJECT_TYPE_SHADER_MODULE, ( u64 )shader_state->shader_stage_info[ compiled_shaders ].module, creation.name );
+        // For debugging.
+        set_resource_name(VK_OBJECT_TYPE_SHADER_MODULE, (u64) shader_state->shader_stage_info[compiled_shaders].module, creation.name);
     }
-    // Not needed anymore - temp allocator freed at the end.
-    //name_buffer.shutdown();
+    
     temporary_allocator->free_marker( current_temporary_marker );
 
     bool creation_failed = compiled_shaders != creation.stages_count;
-    if ( !creation_failed ) {
+    if (!creation_failed) {
         shader_state->active_shaders = compiled_shaders;
         shader_state->name = creation.name;
-    }
-
-    if ( creation_failed ) {
-        destroy_shader_state( handle );
+    } else {
+        destroy_shader_state(handle);
         handle.index = k_invalid_index;
 
-        // Dump shader code
-        rprint( "Error in creation of shader %s. Dumping all shader informations.\n", creation.name );
-        for ( compiled_shaders = 0; compiled_shaders < creation.stages_count; ++compiled_shaders ) {
-            const ShaderStage& stage = creation.stages[ compiled_shaders ];
-            rprint( "%u:\n%s\n", stage.type, stage.code );
+        // Dump shader code.
+        rprint("Error in creation of shader %s. Dumping all shader informations.\n", creation.name);
+        for (compiled_shaders = 0; compiled_shaders < creation.stages_count; ++compiled_shaders) {
+            const ShaderStage &stage = creation.stages[compiled_shaders];
+            rprint("%u:\n%s\n", stage.type, stage.code);
         }
     }
 
@@ -1382,33 +1400,46 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, con
         check( vkCreatePipelineCache( vulkan_device, &pipeline_cache_create_info, vulkan_allocation_callbacks, &pipeline_cache ) );
     }
 
-    ShaderStateHandle shader_state = create_shader_state( creation.shaders );
-    if ( shader_state.index == k_invalid_index ) {
-        // Shader did not compile.
-        pipelines.release_resource( handle.index );
+    // The input PipelineCreation.shaders is an array of ShaderStateCreation structs,
+    // each of which has a char * to the loaded bytes of .glsl code of the corresponding
+    // shader.
+    //
+    // The ShaderState is kept in the device's shaders ResourcePool. Part of it is the
+    // result of parsing the SPIR-V version of shaders; parsing identifies, among other things,
+    // the descriptor set layout of the shaders. This way we don't have to manually write
+    // the application-side representation of descriptor set layouts. 
+    ShaderStateHandle shader_state = create_shader_state(creation.shaders);
+    if (shader_state.index == k_invalid_index) {
+        // Relase the pipeline resource reserved before (from the device's pipelines ResourcePool).
+        pipelines.release_resource(handle.index);
         handle.index = k_invalid_index;
-
         return handle;
     }
 
-    // Now that shaders have compiled we can create the pipeline.
-    Pipeline* pipeline = access_pipeline( handle );
-    ShaderState* shader_state_data = access_shader_state( shader_state );
-
+    // Begin the creation of the pipeline layout.
+    Pipeline* pipeline = access_pipeline(handle);
+    ShaderState* shader_state_data = access_shader_state(shader_state);
     pipeline->shader_state = shader_state;
 
-    VkDescriptorSetLayout vk_layouts[ k_max_descriptor_set_layouts ];
+    // Create descriptor set layouts out of the parsed SPIR-V. (Parsing identifies
+    // the descriptor sets used by the input shader code.)
+    //
+    // k_max_descriptor_set_layouts is currently 8, so we expect the shader to use
+    // 8 or fewer descriptor sets.
+    VkDescriptorSetLayout vk_layouts[k_max_descriptor_set_layouts];
 
+    // Extract from the parsed SPIR-V the number of descriptor sets found in shader code.
     u32 num_active_layouts = shader_state_data->parse_result->set_count;
 
-    // Create VkPipelineLayout
-    for ( u32 l = 0; l < shader_state_data->parse_result->set_count; ++l ) {
-        pipeline->descriptor_set_layout_handle[ l ] = create_descriptor_set_layout( shader_state_data->parse_result->sets[ l ] );
-        pipeline->descriptor_set[ l ] = access_descriptor_set_layout( pipeline->descriptor_set_layout_handle[ l ] );
+    // A SPIR-V parse result is simply an array of DescriptorSetLayoutCreations and a count.
+    for (u32 l = 0; l < shader_state_data->parse_result->set_count; ++l) {
+        pipeline->descriptor_set_layout_handle[l] = create_descriptor_set_layout(shader_state_data->parse_result->sets[l]);
+        pipeline->descriptor_set[l] = access_descriptor_set_layout(pipeline->descriptor_set_layout_handle[l]);
 
-        vk_layouts[ l ] = pipeline->descriptor_set[ l ]->vk_descriptor_set_layout;
+        vk_layouts[l] = pipeline->descriptor_set[l]->vk_descriptor_set_layout;
     }
 
+    // Add a descriptor set layout for bindless resources.
     u32 bindless_active = 0;
     if (bindless_supported) {
         vk_layouts[num_active_layouts] = vulkan_bindless_descriptor_layout;

@@ -174,6 +174,10 @@ static void scene_load_from_gltf( cstring filename, raptor::Renderer& renderer, 
 
     for ( u32 image_index = 0; image_index < scene.gltf_scene.images_count; ++image_index ) {
         glTF::Image& image = scene.gltf_scene.images[ image_index ];
+        // The renderer will store the TextureResource in its ResourceCache.
+        // A TextureResource has a TextureHandle, which in turn has a ResourceHandle, which
+        // is simply a u32: an index. This index is a free index that the GpuDevice
+        // obtains from its ResourcePool of textures (GpuDevice.textures).
         TextureResource* tr = renderer.create_texture( image.uri.data, image.uri.data, true );
         RASSERT( tr != nullptr );
 
@@ -391,9 +395,13 @@ static bool get_mesh_material( raptor::Renderer& renderer, Scene& scene, raptor:
 
         if ( material.pbr_metallic_roughness->base_color_texture != nullptr ) {
             glTF::Texture& diffuse_texture = scene.gltf_scene.textures[ material.pbr_metallic_roughness->base_color_texture->index ];
+            // Get the TextureResource created earlier in scene_load_from_gltf for this
+            // diffuse texture.
             TextureResource& diffuse_texture_gpu = scene.images[ diffuse_texture.source ];
             SamplerResource& diffuse_sampler_gpu = scene.samplers[ diffuse_texture.sampler ];
 
+            // diffuse_texture_gpu is a TextureResource. A TextureResource has a TextureHandle,
+            // which in turn has a ResourceHandle, which is simply a u32: an index.
             mesh_draw.diffuse_texture_index = diffuse_texture_gpu.handle.index;
 
             gpu.link_texture_sampler( diffuse_texture_gpu.handle, diffuse_sampler_gpu.handle );
@@ -531,10 +539,14 @@ int main( int argc, char** argv ) {
         StringBuffer path_buffer;
         path_buffer.init( 1024, allocator );
 
+        // Read vertex and fragment shader code files (GLSL) into memory provided by
+        // our allocator. We deallocate this memory once we are done creating a Program
+        // out of a pipeline and the materials.
+        // 
+        // FileReadResult stores a char * pointing to an array of bytes, and the total size of the array.
         const char* vert_file = "main.vert";
         char* vert_path = path_buffer.append_use_f("%s%s", RAPTOR_SHADER_FOLDER, vert_file );
         FileReadResult vert_code = file_read_text( vert_path, allocator );
-
         const char* frag_file = "main.frag";
         char* frag_path = path_buffer.append_use_f("%s%s", RAPTOR_SHADER_FOLDER, frag_file );
         FileReadResult frag_code = file_read_text( frag_path, allocator );
@@ -561,7 +573,13 @@ int main( int argc, char** argv ) {
         // Blend
         pipeline_creation.blend_state.add_blend_state().set_color( VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD );
 
-        pipeline_creation.shaders.set_name( "main" ).add_stage( vert_code.data, vert_code.size, VK_SHADER_STAGE_VERTEX_BIT ).add_stage( frag_code.data, frag_code.size, VK_SHADER_STAGE_FRAGMENT_BIT );
+        // Add shader stages to the pipeline. The PipelineCreation keeps an array of
+        // ShaderStateCreation structs, each of which stores the pointer to the shader
+        // code bytes that we read, their size, and a bit that identifies the type of
+        // shader (VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT). 
+        pipeline_creation.shaders.set_name("main")
+        .add_stage( vert_code.data, vert_code.size, VK_SHADER_STAGE_VERTEX_BIT )
+        .add_stage( frag_code.data, frag_code.size, VK_SHADER_STAGE_FRAGMENT_BIT );
 
         // Constant buffer
         BufferCreation buffer_creation;
@@ -674,6 +692,12 @@ int main( int argc, char** argv ) {
     float light_range = 20.0f;
     float light_intensity = 80.0f;
 
+    f32 yaw = 0.0f;
+    f32 pitch = 0.0f;
+    vec3s look = vec3s{ 0.0f, 0.0, -1.0f };
+    vec3s right = vec3s{ 1.0f, 0.0, 0.0f };
+    vec3s eye = vec3s{ 0.0f, 2.5f, 2.0f };
+
     while ( !window.requested_exit ) {
         ZoneScopedN("RenderLoop");
 
@@ -724,10 +748,46 @@ int main( int argc, char** argv ) {
             MapBufferParameters cb_map = { scene_cb, 0, 0 };
             float* cb_data = ( float* )gpu.map_buffer( cb_map );
             if ( cb_data ) {
+                // if (input.is_mouse_down(MouseButtons::MOUSE_BUTTONS_LEFT)) {
+                //     pitch += (input.mouse_position.y - input.previous_mouse_position.y) * 0.1f;
+                //     yaw += (input.mouse_position.x - input.previous_mouse_position.x) * 0.3f;
+
+                //     pitch = clamp(pitch, -60.0f, 60.0f);
+
+                //     if (yaw > 360.0f) {
+                //         yaw -= 360.0f;
+                //     }
+
+                //     mat3s rxm = glms_mat4_pick3(glms_rotate_make(glm_rad(-pitch), vec3s{ 1.0f, 0.0f, 0.0f }));
+                //     mat3s rym = glms_mat4_pick3( glms_rotate_make(glm_rad(-yaw), vec3s{ 0.0f, 1.0f, 0.0f }));
+
+                //     look = glms_mat3_mulv(rxm, vec3s{ 0.0f, 0.0f, -1.0f });
+                //     look = glms_mat3_mulv(rym, look);
+
+                //     right = glms_cross(look, vec3s{ 0.0f, 1.0f, 0.0f});
+                // }
+
+                // if (input.is_key_down(Keys::KEY_W)) {
+                //     eye = glms_vec3_add(eye, glms_vec3_scale(look, 5.0f * delta_time));
+                // } else if (input.is_key_down(Keys::KEY_S)) {
+                //     eye = glms_vec3_sub(eye, glms_vec3_scale(look, 5.0f * delta_time));
+                // }
+
+                // if (input.is_key_down( Keys::KEY_D)) {
+                //     eye = glms_vec3_add(eye, glms_vec3_scale(right, 5.0f * delta_time));
+                // } else if (input.is_key_down(Keys::KEY_A)) {
+                //     eye = glms_vec3_sub(eye, glms_vec3_scale(right, 5.0f * delta_time));
+                // }
+
+                // mat4s view = glms_lookat(eye, glms_vec3_add(eye, look), vec3s{ 0.0f, 1.0f, 0.0f });
+                // mat4s projection = glms_perspective(glm_rad(60.0f), gpu.swapchain_width * 1.0f / gpu.swapchain_height, 0.01f, 1000.0f);
+                // mat4s view_projection = glms_mat4_mul(projection, view);
 
                 UniformData uniform_data{ };
                 uniform_data.vp = game_camera.camera.view_projection;
+                // uniform_data.vp = view_projection;
                 uniform_data.eye = vec4s{ game_camera.camera.position.x, game_camera.camera.position.y, game_camera.camera.position.z, 1.0f };
+                // uniform_data.eye = vec4s{ eye.x, eye.y, eye.z, 1.0f };
                 uniform_data.light = vec4s{ light.x, light.y, light.z, 1.0f };
                 uniform_data.light_range = light_range;
                 uniform_data.light_intensity = light_intensity;

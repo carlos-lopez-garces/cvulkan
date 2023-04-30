@@ -227,6 +227,7 @@ TextureResource* Renderer::create_texture( const TextureCreation& creation ) {
     TextureResource* texture = textures.obtain();
 
     if ( texture ) {
+        // Create texture in the GPU.
         TextureHandle handle = gpu->create_texture( creation );
         texture->handle = handle;
         texture->name = creation.name;
