@@ -113,7 +113,11 @@ struct GpuDevice : public Service {
     // Creation/Destruction of resources /////////////////////////////////
     BufferHandle                    create_buffer( const BufferCreation& creation );
     TextureHandle                   create_texture( const TextureCreation& creation );
-    PipelineHandle                  create_pipeline( const PipelineCreation& creation, const char* cache_path = nullptr );
+
+    // cache_path is the path to a file containing data from a previous run; used to 
+    // prime a cached pipeline.
+    PipelineHandle                  create_pipeline(const PipelineCreation& creation, const char* cache_path = nullptr);
+
     SamplerHandle                   create_sampler( const SamplerCreation& creation );
     DescriptorSetLayoutHandle       create_descriptor_set_layout( const DescriptorSetLayoutCreation& creation );
     DescriptorSetHandle             create_descriptor_set( const DescriptorSetCreation& creation );

@@ -1365,39 +1365,58 @@ ShaderStateHandle GpuDevice::create_shader_state(const ShaderStateCreation &crea
     return handle;
 }
 
-PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, const char* cache_path ) {
+// cache_path is the path to a file containing data from a previous run; used to 
+// prime a cached pipeline.
+PipelineHandle GpuDevice::create_pipeline(const PipelineCreation& creation, const char* cache_path) {
     PipelineHandle handle = { pipelines.obtain_resource() };
-    if ( handle.index == k_invalid_index ) {
+    if (handle.index == k_invalid_index) {
+        // No more free slots in the device's pipelines ResourcePool.
         return handle;
     }
 
+    // A pipeline cache accelerates the creation of the pipeline by reusing some of
+    // the state of the pipeline from another run.
     VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
     VkPipelineCacheCreateInfo pipeline_cache_create_info { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
 
-    bool cache_exists = file_exists( cache_path );
-    if ( cache_path != nullptr && cache_exists ) {
-        FileReadResult read_result = file_read_binary( cache_path, allocator );
+    // If cache_path is supplied and valid, the cache is primed with some initial data
+    // saved from another run.
+    bool cache_exists = file_exists(cache_path);
+    if (cache_path != nullptr && cache_exists) {
+        // Read the initial data of the cache from the file into memory (supplied by the allocator).
+        FileReadResult read_result = file_read_binary(cache_path, allocator);
 
-        VkPipelineCacheHeaderVersionOne* cache_header = (VkPipelineCacheHeaderVersionOne*)read_result.data;
-
-        if ( cache_header->deviceID == vulkan_physical_properties.deviceID &&
-             cache_header->vendorID == vulkan_physical_properties.vendorID &&
-             memcmp( cache_header->pipelineCacheUUID, vulkan_physical_properties.pipelineCacheUUID, VK_UUID_SIZE ) == 0 )
-        {
+        // The initial data of the cache has a header with info tha identifies the
+        // device that created it originally. The device will reject the data if that
+        // info doesn't correspond to it.
+        VkPipelineCacheHeaderVersionOne* cache_header = (VkPipelineCacheHeaderVersionOne *) read_result.data;
+        if (cache_header->deviceID == vulkan_physical_properties.deviceID 
+            && cache_header->vendorID == vulkan_physical_properties.vendorID 
+            && memcmp(cache_header->pipelineCacheUUID, vulkan_physical_properties.pipelineCacheUUID, VK_UUID_SIZE) == 0
+        ) {
             pipeline_cache_create_info.initialDataSize = read_result.size;
             pipeline_cache_create_info.pInitialData = read_result.data;
-        }
-        else
-        {
+        } else {
             cache_exists = false;
         }
 
-        check( vkCreatePipelineCache( vulkan_device, &pipeline_cache_create_info, vulkan_allocation_callbacks, &pipeline_cache ) );
+        check(vkCreatePipelineCache(
+            vulkan_device, 
+            &pipeline_cache_create_info,
+            vulkan_allocation_callbacks,
+            &pipeline_cache
+        ));
 
-        allocator->deallocate( read_result.data );
+        allocator->deallocate(read_result.data);
     }
     else {
-        check( vkCreatePipelineCache( vulkan_device, &pipeline_cache_create_info, vulkan_allocation_callbacks, &pipeline_cache ) );
+        // Create new cache.
+        check(vkCreatePipelineCache(
+            vulkan_device,
+            &pipeline_cache_create_info,
+            vulkan_allocation_callbacks,
+            &pipeline_cache
+        ));
     }
 
     // The input PipelineCreation.shaders is an array of ShaderStateCreation structs,
@@ -1628,7 +1647,20 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, con
 
         pipeline_info.pDynamicState = &dynamic_state;
 
-        check( vkCreateGraphicsPipelines( vulkan_device, pipeline_cache, 1, &pipeline_info, vulkan_allocation_callbacks, &pipeline->vk_pipeline ) );
+        check(vkCreateGraphicsPipelines(
+            vulkan_device,
+            // This cache may be populated with initial data (if cache_exists) to create the
+            // pipeline. This data corresponds to the pipeline's data of a previous run.
+            //
+            // Upon successful creation of the pipeline, its data may be retrieved by calling
+            // vkGetPipelineCacheData() and written to a file to serve as the cache for
+            // future runs.
+            pipeline_cache,
+            1,
+            &pipeline_info,
+            vulkan_allocation_callbacks,
+            &pipeline->vk_pipeline
+        ));
 
         pipeline->vk_bind_point = VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
     } else {
@@ -1642,7 +1674,7 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, con
         pipeline->vk_bind_point = VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE;
     }
 
-    if ( cache_path != nullptr && !cache_exists ) {
+    if (cache_path != nullptr && !cache_exists) {
         sizet cache_data_size = 0;
         check( vkGetPipelineCacheData( vulkan_device, pipeline_cache, &cache_data_size, nullptr ) );
 
