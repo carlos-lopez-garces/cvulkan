@@ -254,51 +254,69 @@ void GpuDevice::init( const DeviceCreation& creation ) {
     // TODO: remove when finished with bindless
     //bindless_supported = false;
 
-    //////// Create logical device
+    // Query the queue families of the physical device. A queue family is a group of queues
+    // that have identical capabilities but are able to run in parallel. Queue families may
+    // have a different number of queues each; and all of the queues in a family have the
+    // same capabilities (marked with the family's flags, VK_QUEUE_GRAPHICS_BIT, VK_QUEUE_COMPUTE_BIT,
+    // VK_QUEUE_TRANSFER_BIT, and VK_QUEUE_SPARSE_BINDING_BIT). 
     u32 queue_family_count = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties( vulkan_physical_device, &queue_family_count, nullptr );
+    // vkGetPhysicalDeviceQueueFamilyProperties is called twice: the first time is to get
+    // the number of queue families; knowing the number, you can allocate a sufficiently
+    // large array of VkQueueFamilyProperties to call it again with.
+    vkGetPhysicalDeviceQueueFamilyProperties(vulkan_physical_device, &queue_family_count, nullptr);
+    VkQueueFamilyProperties *queue_families = (VkQueueFamilyProperties *) ralloca(sizeof(VkQueueFamilyProperties) * queue_family_count, temp_allocator);
+    vkGetPhysicalDeviceQueueFamilyProperties(vulkan_physical_device, &queue_family_count, queue_families);
 
-    VkQueueFamilyProperties* queue_families = ( VkQueueFamilyProperties* )ralloca( sizeof( VkQueueFamilyProperties ) * queue_family_count, temp_allocator );
-    vkGetPhysicalDeviceQueueFamilyProperties( vulkan_physical_device, &queue_family_count, queue_families );
+    // Determine the index of the family that has queues that support graphics, compute,
+    // and transfer commands; this will be the main queue.
+    //
+    // Determine the index of the family that only supports transfer commands.
+    u32 main_queue_index = u32_max, transfer_queue_index = u32_max;
+    for (u32 fi = 0; fi < queue_family_count; ++fi) {
+        VkQueueFamilyProperties queue_family = queue_families[fi];
 
-    u32 main_queue_index = u32_max, transfer_queue_index = u32_max, compute_queue_index = u32_max, present_queue_index = u32_max;
-    for ( u32 fi = 0; fi < queue_family_count; ++fi) {
-        VkQueueFamilyProperties queue_family = queue_families[ fi ];
-
-        if ( queue_family.queueCount == 0 ) {
+        if (queue_family.queueCount == 0) {
             continue;
         }
+
 #if defined(_DEBUG)
-        rprint( "Family %u, flags %u queue count %u\n", fi, queue_family.queueFlags, queue_family.queueCount );
+        rprint("Family %u, flags %u queue count %u\n", fi, queue_family.queueFlags, queue_family.queueCount);
 #endif // DEBUG
 
-        // Search for main queue that should be able to do all work (graphics, compute and transfer)
-        if ( (queue_family.queueFlags & ( VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT )) == ( VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT ) ) {
+        // Main queue? Should support graphics, compute, and transfer commands.
+        if ((queue_family.queueFlags & (VK_QUEUE_GRAPHICS_BIT|VK_QUEUE_COMPUTE_BIT|VK_QUEUE_TRANSFER_BIT)) == (VK_QUEUE_GRAPHICS_BIT|VK_QUEUE_COMPUTE_BIT|VK_QUEUE_TRANSFER_BIT)) {
             main_queue_index = fi;
         }
-        // Search for transfer queue
-        if ( ( queue_family.queueFlags & VK_QUEUE_COMPUTE_BIT ) == 0 && (queue_family.queueFlags & VK_QUEUE_TRANSFER_BIT) ) {
+
+        // Transfer queue only? Some devices don't have dedicated families for transfer.
+        if ((queue_family.queueFlags & VK_QUEUE_COMPUTE_BIT) == 0 && (queue_family.queueFlags & VK_QUEUE_TRANSFER_BIT)) {
             transfer_queue_index = fi;
         }
     }
-
-    // Cache family indices
+    // Save these indices.
     vulkan_main_queue_family = main_queue_index;
     vulkan_transfer_queue_family = transfer_queue_index;
 
     u32 device_extension_count = 1;
     const char* device_extensions[] = { "VK_KHR_swapchain" };
-    const float queue_priority[] = { 1.0f };
-    VkDeviceQueueCreateInfo queue_info[ 2 ] = {};
 
-    VkDeviceQueueCreateInfo& main_queue = queue_info[ 0 ];
+    const float queue_priority[] = { 1.0f };
+    // Creation structs for the main and transfer queues.
+    VkDeviceQueueCreateInfo queue_info[2] = {};
+
+    // Creation struct for the main queue, within the queue family identified
+    // before for having graphics, compute, and transfer capabilities.
+    VkDeviceQueueCreateInfo &main_queue = queue_info[0];
     main_queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     main_queue.queueFamilyIndex = main_queue_index;
     main_queue.queueCount = 1;
     main_queue.pQueuePriorities = queue_priority;
 
-    if ( vulkan_transfer_queue_family < queue_family_count ) {
-        VkDeviceQueueCreateInfo& transfer_queue_info = queue_info[ 1 ];
+    // Some devices don't have dedicated families for transfer.
+    if (vulkan_transfer_queue_family < queue_family_count) {
+        // Creation struct for the transfer queue, within the queue family identified
+        // before for having only the transfer capability.
+        VkDeviceQueueCreateInfo &transfer_queue_info = queue_info[1];
         transfer_queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         transfer_queue_info.queueFamilyIndex = transfer_queue_index;
         transfer_queue_info.queueCount = 1;
@@ -311,6 +329,7 @@ void GpuDevice::init( const DeviceCreation& creation ) {
 
     VkDeviceCreateInfo device_create_info { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     device_create_info.queueCreateInfoCount = vulkan_transfer_queue_family < queue_family_count ? 2 : 1;
+    // Queues.
     device_create_info.pQueueCreateInfos = queue_info;
     device_create_info.enabledExtensionCount = device_extension_count;
     device_create_info.ppEnabledExtensionNames = device_extensions;
@@ -334,11 +353,14 @@ void GpuDevice::init( const DeviceCreation& creation ) {
         pfnCmdBeginDebugUtilsLabelEXT = ( PFN_vkCmdBeginDebugUtilsLabelEXT )vkGetDeviceProcAddr( vulkan_device, "vkCmdBeginDebugUtilsLabelEXT" );
         pfnCmdEndDebugUtilsLabelEXT = ( PFN_vkCmdEndDebugUtilsLabelEXT )vkGetDeviceProcAddr( vulkan_device, "vkCmdEndDebugUtilsLabelEXT" );
     }
-    // Get main queue
-    vkGetDeviceQueue( vulkan_device, main_queue_index, 0, &vulkan_main_queue );
-    // Get transfer queue if present
-    if ( vulkan_transfer_queue_family < queue_family_count ) {
-        vkGetDeviceQueue( vulkan_device, transfer_queue_index, 0, &vulkan_transfer_queue );
+
+    // Obtain VkQueue of main queue (supports graphics, compute, and transfer commands).
+    vkGetDeviceQueue(vulkan_device, main_queue_index, 0, &vulkan_main_queue);
+    
+    // Some devices don't have dedicated families for transfer.
+    if (vulkan_transfer_queue_family < queue_family_count) {
+        // Obtain VkQueue of transfer queue.
+        vkGetDeviceQueue(vulkan_device, transfer_queue_index, 0, &vulkan_transfer_queue);
     }
 
     //////// Create drawable surface

@@ -279,10 +279,23 @@ struct GpuDevice : public Service {
     VkPhysicalDevice                vulkan_physical_device;
     VkPhysicalDeviceProperties      vulkan_physical_properties;
     VkDevice                        vulkan_device;
+
+    // Main queue. Supports graphics, compute, and transfer commands.
     VkQueue                         vulkan_main_queue;
+
+    // Transfer queue. Supports transfer commands only.
     VkQueue                         vulkan_transfer_queue;
+
+    // Index of the main queue family in the array of VkQueueFamilyProperties returned
+    // by vkGetPhysicalDeviceQueueFamilyProperties. The main queue family contains
+    // queues that support graphics, compute, and transfer commands.
     u32                             vulkan_main_queue_family;
+
+    // Index of the transfer queue family in the array of VkQueueFamilyProperties returned
+    // by vkGetPhysicalDeviceQueueFamilyProperties. The transfer queue family contains
+    // queues that support transfer commands only.
     u32                             vulkan_transfer_queue_family;
+
     VkDescriptorPool                vulkan_descriptor_pool;
 
     // [TAG: BINDLESS]
