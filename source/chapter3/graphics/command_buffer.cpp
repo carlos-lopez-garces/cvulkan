@@ -677,15 +677,27 @@ void CommandBuffer::pop_marker() {
     device->pop_marker( vk_command_buffer );
 }
 
-void CommandBuffer::upload_texture_data( TextureHandle texture_handle, void* texture_data, BufferHandle staging_buffer_handle, sizet staging_buffer_offset ) {
-
-    Texture* texture = device->access_texture( texture_handle );
+// Engine wrapper for vkCmdCopyBufferToImage().
+void CommandBuffer::upload_texture_data(
+    TextureHandle texture_handle,
+    void* texture_data,
+    BufferHandle staging_buffer_handle,
+    sizet staging_buffer_offset
+) {
+    // Get the texture from the device's textures ResourcePool.
+    Texture* texture = device->access_texture(texture_handle);
     Buffer* staging_buffer = device->access_buffer( staging_buffer_handle );
     u32 image_size = texture->width * texture->height * 4;
 
-    // Copy buffer_data to staging buffer
-    memcpy( staging_buffer->mapped_data + staging_buffer_offset, texture_data, static_cast< size_t >( image_size ) );
+    // The texture's data into the staging buffer.
+    memcpy(
+        staging_buffer->mapped_data + staging_buffer_offset,
+        texture_data,
+        static_cast<size_t>(image_size)
+    );
 
+    // Copy command to record in the command buffer. From the staging buffer to the
+    // image resource.
     VkBufferImageCopy region = {};
     region.bufferOffset = staging_buffer_offset;
     region.bufferRowLength = 0;
@@ -699,15 +711,36 @@ void CommandBuffer::upload_texture_data( TextureHandle texture_handle, void* tex
     region.imageOffset = { 0, 0, 0 };
     region.imageExtent = { texture->width, texture->height, texture->depth };
 
-    // Pre copy memory barrier to perform layout transition
-    util_add_image_barrier( vk_command_buffer, texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_COPY_DEST, 0, 1, false );
-    // Copy from the staging buffer to the image
-    vkCmdCopyBufferToImage( vk_command_buffer, staging_buffer->vk_buffer, texture->vk_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+    // Add memory barrier (VkImageMemoryBarrier).
+    util_add_image_barrier(vk_command_buffer, texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_COPY_DEST, 0, 1, false);
 
-    // Post copy memory barrier
-    util_add_image_barrier_ext( vk_command_buffer, texture->vk_image, RESOURCE_STATE_COPY_DEST, RESOURCE_STATE_COPY_SOURCE,
-                                0, 1, false, device->vulkan_transfer_queue_family, device->vulkan_main_queue_family,
-                                QueueType::CopyTransfer, QueueType::Graphics );
+    // Record copy command into the command buffer. Copy the texture's data from
+    // the staging buffer to the image resource.
+    vkCmdCopyBufferToImage(
+        vk_command_buffer,
+        staging_buffer->vk_buffer,
+        texture->vk_image,
+        // TODO: ?
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region
+    );
+
+    // Add memory barrier (VkImageMemoryBarrier). This barrier signals Vulkan that the
+    // texture is ready to be accessed by shaders.
+    util_add_image_barrier_ext(
+        vk_command_buffer,
+        texture->vk_image,
+        RESOURCE_STATE_COPY_DEST,
+        RESOURCE_STATE_COPY_SOURCE,
+        0,
+        1,
+        false,
+        device->vulkan_transfer_queue_family,
+        device->vulkan_main_queue_family,
+        QueueType::CopyTransfer,
+        QueueType::Graphics
+    );
 
     texture->vk_image_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 }

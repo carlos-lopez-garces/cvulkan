@@ -193,8 +193,13 @@ struct UploadRequest {
     raptor::BufferHandle            gpu_buffer  = raptor::k_invalid_buffer;
 }; // struct UploadRequest
 
+// Responsibilities of the asynchronous loader:
 //
-//
+// - Load files from disk.
+// - Process GPU upload transfers.
+// - Manage a staging buffer used when copying data.
+// - Enqueue command buffers with copy commands.
+// - Signal the renderer that a texture has finished transferring.
 struct AsynchronousLoader {
 
     void                            init( raptor::Renderer* renderer, enki::TaskScheduler* task_scheduler, raptor::Allocator* resident_allocator );
@@ -209,18 +214,28 @@ struct AsynchronousLoader {
     raptor::Renderer*               renderer        = nullptr;
     enki::TaskScheduler*            task_scheduler  = nullptr;
 
+    // Queue of requests to read files from disk.
     raptor::Array<FileLoadRequest>  file_load_requests;
+
+    // Queue of requests to upload something to the GPU.
     raptor::Array<UploadRequest>    upload_requests;
 
+    // A buffer where data is staged for transfer to the GPU.
     raptor::Buffer*                 staging_buffer  = nullptr;
 
+    // Offset of the start of available memory within the buffer. Should be
+    // updated atomically.
     std::atomic_size_t              staging_buffer_offset;
+
     raptor::TextureHandle           texture_ready;
     raptor::BufferHandle            cpu_buffer_ready;
     raptor::BufferHandle            gpu_buffer_ready;
     u32*                            completed;
 
-    VkCommandPool                   command_pools[ raptor::GpuDevice::k_max_frames ];
+    // Command pools used to allocate command buffers. These pools are specifically
+    // used for command buffers submitted to transfer queues.
+    VkCommandPool                   command_pools[raptor::GpuDevice::k_max_frames];
+
     raptor::CommandBuffer           command_buffers[ raptor::GpuDevice::k_max_frames ];
     VkSemaphore                     transfer_complete_semaphore;
     VkFence                         transfer_fence;
@@ -1607,8 +1622,10 @@ void AsynchronousLoader::init( raptor::Renderer* renderer_, enki::TaskScheduler*
     task_scheduler = task_scheduler_;
     allocator = resident_allocator;
 
-    file_load_requests.init( allocator, 16 );
-    upload_requests.init( allocator, 16 );
+    // Queue of requests to read files from disk.
+    file_load_requests.init(allocator, 16);
+    // Queue of requests to upload something to the GPU.
+    upload_requests.init(allocator, 16);
 
     texture_ready.index = raptor::k_invalid_texture.index;
     cpu_buffer_ready.index = raptor::k_invalid_buffer.index;
@@ -1617,39 +1634,66 @@ void AsynchronousLoader::init( raptor::Renderer* renderer_, enki::TaskScheduler*
 
     using namespace raptor;
 
-    // Create a persistently-mapped staging buffer
+    // BufferCreation is an engine wrapper for a VkBuffer. This staging buffer of 
+    // 64 MB is for storing data to be transferred to the GPU.
     BufferCreation bc;
-    bc.reset().set( VK_BUFFER_USAGE_TRANSFER_SRC_BIT, ResourceUsageType::Stream, rmega( 64 ) ).set_name( "staging_buffer" ).set_persistent( true );
-    BufferHandle staging_buffer_handle = renderer->gpu->create_buffer( bc );
-
-    staging_buffer = renderer->gpu->access_buffer( staging_buffer_handle );
-
+    bc.reset()
+    // This flag allows this buffer to act as data source for transfer commands.
+    .set(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, ResourceUsageType::Stream, rmega(64))
+    .set_name("staging_buffer")
+    // Persistently mapped. See VMA's Memory mapping: https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/memory_mapping.html.
+    .set_persistent(true);
+    BufferHandle staging_buffer_handle = renderer->gpu->create_buffer(bc);
+    staging_buffer = renderer->gpu->access_buffer(staging_buffer_handle);
+    // Marks the position of the first available byte within the buffer.
     staging_buffer_offset = 0;
 
-    for ( u32 i = 0; i < GpuDevice::k_max_frames; ++i) {
+    // k_max_frames appears to correspond to the number of buffers in the swapchain, 2.
+    for (u32 i = 0; i < GpuDevice::k_max_frames; ++i) {
+        // A VkCommandPool is used to allocate memory for VkCommandBuffers.
+        // Create a pool for commands meant for the transfer queue.
         VkCommandPoolCreateInfo cmd_pool_info = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr };
+        // Associate command pool with transfer queue.
         cmd_pool_info.queueFamilyIndex = renderer->gpu->vulkan_transfer_queue_family;
         cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-        vkCreateCommandPool( renderer->gpu->vulkan_device, &cmd_pool_info, renderer->gpu->vulkan_allocation_callbacks, &command_pools[i]);
+        vkCreateCommandPool(
+            renderer->gpu->vulkan_device,
+            &cmd_pool_info,
+            renderer->gpu->vulkan_allocation_callbacks,
+            &command_pools[i]
+        );
 
         VkCommandBufferAllocateInfo cmd = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr };
         cmd.commandPool = command_pools[i];
         cmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cmd.commandBufferCount = 1;
 
-        vkAllocateCommandBuffers( renderer->gpu->vulkan_device, &cmd, &command_buffers[i].vk_command_buffer );
+        // Allocate 1 command buffer from this pool. It'll be suitable for submission
+        // to the transfer queue (because this pool is linked to it).
+        vkAllocateCommandBuffers(renderer->gpu->vulkan_device, &cmd, &command_buffers[i].vk_command_buffer);
 
-        command_buffers[ i ].is_recording = false;
-        command_buffers[ i ].device = ( renderer->gpu );
+        command_buffers[i].is_recording = false;
+        command_buffers[i].device = renderer->gpu;
     }
 
     VkSemaphoreCreateInfo semaphore_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    vkCreateSemaphore( renderer->gpu->vulkan_device, &semaphore_info, renderer->gpu->vulkan_allocation_callbacks, &transfer_complete_semaphore );
+    vkCreateSemaphore(
+        renderer->gpu->vulkan_device,
+        &semaphore_info,
+        renderer->gpu->vulkan_allocation_callbacks,
+        &transfer_complete_semaphore
+    );
 
     VkFenceCreateInfo fence_info{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    // Create the fence in the signaled state, which means that vkGetFenceStatus()
+    // will return VK_SUCCESS immediately the first time.
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    vkCreateFence( renderer->gpu->vulkan_device, &fence_info, renderer->gpu->vulkan_allocation_callbacks, &transfer_fence );
+    vkCreateFence(
+        renderer->gpu->vulkan_device,
+        &fence_info,
+        renderer->gpu->vulkan_allocation_callbacks,
+        &transfer_fence
+    );
 }
 
 void AsynchronousLoader::shutdown() {
@@ -1691,45 +1735,53 @@ void AsynchronousLoader::update( raptor::Allocator* scratch_allocator ) {
 
     texture_ready.index = k_invalid_texture.index;
 
-    // Process upload requests
+    // Process GPU upload requests. File load requests, for example, result in
+    // GPU upload requests for the loaded file.
     if ( upload_requests.size ) {
         ZoneScoped;
 
-        // Wait for transfer fence to be finished
-        if ( vkGetFenceStatus( renderer->gpu->vulkan_device, transfer_fence ) != VK_SUCCESS ) {
+        if (vkGetFenceStatus(renderer->gpu->vulkan_device, transfer_fence) != VK_SUCCESS) {
+            // The fence is unsignaled.
             return;
         }
-        // Reset if file requests are present.
-        vkResetFences( renderer->gpu->vulkan_device, 1, &transfer_fence );
 
-        // Get last request
+        vkResetFences(renderer->gpu->vulkan_device, 1, &transfer_fence);
+
+        // Get request.
         UploadRequest request = upload_requests.back();
         upload_requests.pop();
 
-        CommandBuffer* cb = &command_buffers[ renderer->gpu->current_frame ];
+        CommandBuffer *cb = &command_buffers[renderer->gpu->current_frame];
+
+        // Engine wrapper for vkBeginCommandBuffer(), which signals Vulkan that the
+        // application will start to record commands into the command buffer.
         cb->begin();
 
-        if ( request.texture.index != k_invalid_texture.index ) {
-            Texture* texture = renderer->gpu->access_texture( request.texture );
+        if (request.texture.index != k_invalid_texture.index) {
+            // Get the texture from the device's textures ResourcePool using the texture's
+            // handle.
+            Texture* texture = renderer->gpu->access_texture(request.texture);
+
             const u32 k_texture_channels = 4;
             const u32 k_texture_alignment = 4;
-            const sizet aligned_image_size = memory_align( texture->width * texture->height * k_texture_channels, k_texture_alignment );
-            // Request place in buffer
-            const sizet current_offset = std::atomic_fetch_add( &staging_buffer_offset, aligned_image_size );
+            const sizet aligned_image_size = memory_align(texture->width * texture->height * k_texture_channels, k_texture_alignment);
+            // Reserve memory in the staging buffer for this texture.
+            const sizet current_offset = std::atomic_fetch_add(&staging_buffer_offset, aligned_image_size);
 
-            cb->upload_texture_data( texture->handle, request.data, staging_buffer->handle, current_offset );
+            // The command buffer handles the upload to the GPU. It uses the staging
+            // buffer in the process.
+            //
+            // CommandBuffer.upload_texture_data() is an engine wrapper for vkCmdCopyBufferToImage().
+            cb->upload_texture_data(texture->handle, request.data, staging_buffer->handle, current_offset);
 
-            free( request.data );
-        }
-        else if ( request.cpu_buffer.index != k_invalid_buffer.index && request.gpu_buffer.index != k_invalid_buffer.index ) {
+            free(request.data);
+        } else if (request.cpu_buffer.index != k_invalid_buffer.index && request.gpu_buffer.index != k_invalid_buffer.index) {
             Buffer* src = renderer->gpu->access_buffer( request.cpu_buffer );
             Buffer* dst = renderer->gpu->access_buffer( request.gpu_buffer );
 
             cb->upload_buffer_data( src->handle, dst->handle );
-        }
-        else if ( request.cpu_buffer.index != k_invalid_buffer.index ) {
+        } else if (request.cpu_buffer.index != k_invalid_buffer.index) {
             Buffer* buffer = renderer->gpu->access_buffer( request.cpu_buffer );
-            // TODO: proper alignment
             const sizet aligned_image_size = memory_align( buffer->size, 64 );
             const sizet current_offset = std::atomic_fetch_add( &staging_buffer_offset, aligned_image_size );
             cb->upload_buffer_data( buffer->handle, request.data, staging_buffer->handle, current_offset );
@@ -1737,6 +1789,7 @@ void AsynchronousLoader::update( raptor::Allocator* scratch_allocator ) {
             free( request.data );
         }
 
+        // Engine wrapper for vkEndCommandBuffer().
         cb->end();
 
         VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1770,19 +1823,20 @@ void AsynchronousLoader::update( raptor::Allocator* scratch_allocator ) {
         }
     }
 
-    // Process a file request
-    if ( file_load_requests.size ) {
+    // Process a file request.
+    if (file_load_requests.size) {
+        // Get next request.
         FileLoadRequest load_request = file_load_requests.back();
         file_load_requests.pop();
 
         i64 start_reading_file = time_now();
-        // Process request
         int x, y, comp;
-        u8* texture_data = stbi_load( load_request.path, &x, &y, &comp, 4 );
+        u8 *texture_data = stbi_load(load_request.path, &x, &y, &comp, 4);
 
-        if ( texture_data ) {
-            rprint( "File %s read in %f ms\n", load_request.path, time_from_milliseconds( start_reading_file ) );
+        if (texture_data) {
+            rprint("File %s read in %f ms\n", load_request.path, time_from_milliseconds(start_reading_file));
 
+            // Record a GPU upload request for this file.
             UploadRequest& upload_request = upload_requests.push_use();
             upload_request.data = texture_data;
             upload_request.texture = load_request.texture;
@@ -1822,37 +1876,45 @@ void AsynchronousLoader::request_buffer_copy( raptor::BufferHandle src, raptor::
     upload_request.texture = raptor::k_invalid_texture;
 }
 
-// IOTasks ////////////////////////////////////////////////////////////////
-//
-//
+// A pinned task is associated to one particular thread. The scheduler gives that
+// task to this thread only and this thread executes this task almost exclusively
+// (unless a high priority task needs to execute and there's no other free thread).
 struct RunPinnedTaskLoopTask : enki::IPinnedTask {
+    enki::TaskScheduler *task_scheduler;
+    // When set to false, exit.
+    bool execute = true;
 
     void Execute() override {
-        while ( task_scheduler->GetIsRunning() && execute ) {
-            task_scheduler->WaitForNewPinnedTasks(); // this thread will 'sleep' until there are new pinned tasks
+        while (task_scheduler->GetIsRunning() && execute) {
+            // Wait for new pinned tasks.
+            task_scheduler->WaitForNewPinnedTasks();
+            // Execute pinned tasks.
             task_scheduler->RunPinnedTasks();
         }
     }
+};
 
-    enki::TaskScheduler*    task_scheduler;
-    bool                    execute         = true;
-}; // struct RunPinnedTaskLoopTask
-
+// Thread that runs the asynchronous loader.
 //
-//
+// Responsibilities of the asynchronous loader:
+// - Load files from disk.
+// - Process GPU upload transfers.
+// - Manage a staging buffer used when copying data.
+// - Enqueue command buffers with copy commands.
+// - Signal the renderer that a texture has finished transferring.
 struct AsynchronousLoadTask : enki::IPinnedTask {
+    AsynchronousLoader *async_loader;
+    enki::TaskScheduler *task_scheduler;
+    bool execute = true;
 
     void Execute() override {
-        // Do file IO
-        while ( execute ) {
-            async_loader->update( nullptr );
+        // Spin. The AsynchronousLoader will check for requests for loading
+        // and updating resources and serve them if there are any. 
+        while (execute) {
+            async_loader->update(nullptr);
         }
     }
-
-    AsynchronousLoader*     async_loader;
-    enki::TaskScheduler*    task_scheduler;
-    bool                    execute         = true;
-}; // struct AsynchronousLoadTask
+};
 
 int main( int argc, char** argv ) {
 
@@ -1873,12 +1935,13 @@ int main( int argc, char** argv ) {
     scratch_allocator.init( rmega( 8 ) );
 
     enki::TaskSchedulerConfig config;
-    // In this example we create more threads than the hardware can run,
-    // because the IO thread will spend most of it's time idle or blocked
-    // and therefore not scheduled for CPU time by the OS
+    // 1 more than std::thread::hardware_concurrency(), which returns the number of
+    // concurrent threads supported by the implementation (this may be less or more
+    // than the number of available cores; the OS may restrict the number of cores
+    // available to the application or, conversely, multiple threads per core may be
+    // supported). 1 more because the I/O thread is typically idle.
     config.numTaskThreadsToCreate += 1;
     enki::TaskScheduler task_scheduler;
-
     task_scheduler.Initialize( config );
 
     // window
@@ -1953,12 +2016,12 @@ int main( int argc, char** argv ) {
 
     scene->prepare_draws( &renderer, &scratch_allocator );
 
-    // Start multithreading IO
-    // Create IO threads at the end
+    // Create a pinned task and pin it to the last thread.
+    // TODO: what is this task about?
     RunPinnedTaskLoopTask run_pinned_task;
     run_pinned_task.threadNum = task_scheduler.GetNumTaskThreads() - 1;
     run_pinned_task.task_scheduler = &task_scheduler;
-    task_scheduler.AddPinnedTask( &run_pinned_task );
+    task_scheduler.AddPinnedTask(&run_pinned_task);
 
     // Send async load task to external thread FILE_IO
     AsynchronousLoadTask async_load_task;
