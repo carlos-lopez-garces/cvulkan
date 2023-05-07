@@ -81,8 +81,8 @@ struct CommandBuffer {
 }; // struct CommandBuffer
 
 
+// Manages command buffer pools for all threads.
 struct CommandBufferManager {
-
     void                    init( GpuDevice* gpu, u32 num_threads );
     void                    shutdown();
 
@@ -94,17 +94,21 @@ struct CommandBufferManager {
     u16                     pool_from_index( u32 index ) { return (u16)index / num_pools_per_frame; }
     u32                     pool_from_indices( u32 frame_index, u32 thread_index );
 
+    // A pool per frame in the swapchain for each thread.
     Array<VkCommandPool>    vulkan_command_pools;
+    // See num_command_buffers_per_thread.
     Array<CommandBuffer>    command_buffers;
     Array<CommandBuffer>    secondary_command_buffers;
-    Array<u8>               used_buffers;       // Track how many buffers were used per thread per frame.
+
+    // Keep a count of buffers allocated from each pool (i.e. frame+thread).
+    Array<u8>               used_buffers;
     Array<u8>               used_secondary_command_buffers;
 
     GpuDevice*              gpu                     = nullptr;
+    // Initialized to the number of threads.
     u32                     num_pools_per_frame     = 0;
     u32                     num_command_buffers_per_thread = 3;
-
-}; // struct CommandBufferManager
+};
 
 
 } // namespace raptor

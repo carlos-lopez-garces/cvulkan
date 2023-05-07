@@ -140,11 +140,15 @@ void CommandBuffer::begin() {
 void CommandBuffer::begin_secondary( RenderPass* current_render_pass_ ) {
     if ( !is_recording ) {
         VkCommandBufferInheritanceInfo inheritance{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO };
+        // Secondary command buffers (executed from a primary command buffer)
+        // inherit their primary's render pass and framebuffer.
         inheritance.renderPass = current_render_pass_->vk_render_pass;
         inheritance.subpass = 0;
         inheritance.framebuffer = current_render_pass_->vk_frame_buffer;
 
         VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        // The command buffer will be used inside a renderpass and is valid only
+        // for secondary command buffers.
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
         beginInfo.pInheritanceInfo = &inheritance;
 
@@ -173,8 +177,7 @@ void CommandBuffer::end_current_render_pass() {
     }
 }
 
-void CommandBuffer::bind_pass( RenderPassHandle handle_, bool use_secondary ) {
-
+void CommandBuffer::bind_pass(RenderPassHandle handle_, bool use_secondary) {
     //if ( !is_recording )
     {
         is_recording = true;
@@ -186,22 +189,23 @@ void CommandBuffer::bind_pass( RenderPassHandle handle_, bool use_secondary ) {
             vkCmdEndRenderPass( vk_command_buffer );
         }
 
-        if ( render_pass != current_render_pass && ( render_pass->type != RenderPassType::Compute ) ) {
+        if (render_pass != current_render_pass && (render_pass->type != RenderPassType::Compute)) {
             VkRenderPassBeginInfo render_pass_begin{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
             render_pass_begin.framebuffer = render_pass->type == RenderPassType::Swapchain ? device->vulkan_swapchain_framebuffers[device->vulkan_image_index] : render_pass->vk_frame_buffer;
             render_pass_begin.renderPass = render_pass->vk_render_pass;
-
             render_pass_begin.renderArea.offset = { 0, 0 };
             render_pass_begin.renderArea.extent = { render_pass->width, render_pass->height };
-
-            // TODO: this breaks.
-            render_pass_begin.clearValueCount = 2;// render_pass->output.color_operation ? 2 : 0;
+            render_pass_begin.clearValueCount = 2;
+            // TODO: ?
+            // render_pass->output.color_operation ? 2 : 0;
             render_pass_begin.pClearValues = clears;
 
-            vkCmdBeginRenderPass( vk_command_buffer, &render_pass_begin, use_secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE );
+            // When VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS is passed, the render
+            // pass can be parallelized across several secondary command buffers.
+            vkCmdBeginRenderPass(vk_command_buffer, &render_pass_begin, use_secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
         }
 
-        // Cache render pass
+        // Cache render pass.
         current_render_pass = render_pass;
     }
 }
@@ -783,81 +787,90 @@ void CommandBuffer::upload_buffer_data( BufferHandle src_, BufferHandle dst_ ) {
 }
 
 // CommandBufferManager ///////////////////////////////////////////////////
-void CommandBufferManager::init( GpuDevice* gpu_, u32 num_threads ) {
-
+void CommandBufferManager::init(GpuDevice* gpu_, u32 num_threads) {
     gpu = gpu_;
     num_pools_per_frame = num_threads;
 
-    // Create pools: num frames * num threads;
+    // A pool per frame in the swapchain for each thread.
     const u32 total_pools = num_pools_per_frame * gpu->k_max_frames;
-    vulkan_command_pools.init( gpu->allocator, total_pools, total_pools );
-    // Init per thread-frame used buffers
-    used_buffers.init( gpu->allocator, total_pools, total_pools );
-    used_secondary_command_buffers.init( gpu->allocator, total_pools, total_pools );
+    vulkan_command_pools.init(gpu->allocator, total_pools, total_pools);
 
-    for ( u32 i = 0; i < total_pools; i++ ) {
+    // Keep a count of buffers allocated from each pool (i.e. frame+thread).
+    used_buffers.init(gpu->allocator, total_pools, total_pools);
+    used_secondary_command_buffers.init(gpu->allocator, total_pools, total_pools);
+
+    // All these pools are associated with the main queue. Command buffers allocated
+    // from these pools are submitted to the main queue.
+    for (u32 i = 0; i < total_pools; i++) {
         VkCommandPoolCreateInfo cmd_pool_info = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr };
+        // Main queue (graphics, compute, and transfer).
         cmd_pool_info.queueFamilyIndex = gpu->vulkan_main_queue_family;
         cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
-        vkCreateCommandPool( gpu->vulkan_device, &cmd_pool_info, gpu->vulkan_allocation_callbacks, &vulkan_command_pools[ i ] );
+        vkCreateCommandPool(gpu->vulkan_device, &cmd_pool_info, gpu->vulkan_allocation_callbacks, &vulkan_command_pools[i]);
 
-        used_buffers[ i ] = 0;
-        used_secondary_command_buffers[ i ] = 0;
+        used_buffers[i] = 0;
+        used_secondary_command_buffers[i] = 0;
     }
 
-    // Create command buffers: pools * buffers per pool
+    // Primary command buffers.
+    // Primary command buffers can record any command. But their granularity is coarse:
+    // at least one render pass must be used and no pass can be parallelized. Only 
+    // primary command buffers can be submitted to queues.
     const u32 total_buffers = total_pools * num_command_buffers_per_thread;
-    command_buffers.init( gpu->allocator, total_buffers, total_buffers );
+    command_buffers.init(gpu->allocator, total_buffers, total_buffers);
 
+    // Secondary command buffers.
+    // Secondary command buffers can only record draw commands within a render pass. But
+    // they can be used to parallelize the render pass (if it contains many draw calls,
+    // like a G-Buffer render pass).
     const u32 total_secondary_buffers = total_pools * k_secondary_command_buffers_count;
-    secondary_command_buffers.init( gpu->allocator, total_secondary_buffers );
+    secondary_command_buffers.init(gpu->allocator, total_secondary_buffers);
 
-    for ( u32 i = 0; i < total_buffers; i++ ) {
+    // Allocate primary command buffers.
+    for (u32 i = 0; i < total_buffers; i++) {
         VkCommandBufferAllocateInfo cmd = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr };
 
-        const u32 frame_index = i / ( num_command_buffers_per_thread * num_pools_per_frame );
-        const u32 thread_index = ( i / num_command_buffers_per_thread ) % num_pools_per_frame;
-        const u32 pool_index = pool_from_indices( frame_index, thread_index );
+        const u32 frame_index = i / (num_command_buffers_per_thread * num_pools_per_frame);
+        const u32 thread_index = (i / num_command_buffers_per_thread) % num_pools_per_frame;
+        const u32 pool_index = pool_from_indices(frame_index, thread_index);
+
         //rprint( "Indices i:%u f:%u t:%u p:%u\n", i, frame_index, thread_index, pool_index );
-        cmd.commandPool = vulkan_command_pools[ pool_index ];
+
+        cmd.commandPool = vulkan_command_pools[pool_index];
+        // Primary.
         cmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cmd.commandBufferCount = 1;
 
-        CommandBuffer& current_command_buffer = command_buffers[ i ];
-        vkAllocateCommandBuffers( gpu->vulkan_device, &cmd, &current_command_buffer.vk_command_buffer );
+        CommandBuffer& current_command_buffer = command_buffers[i];
+        vkAllocateCommandBuffers(gpu->vulkan_device, &cmd, &current_command_buffer.vk_command_buffer);
 
-        // TODO(marco): move to have a ring per queue per thread
         current_command_buffer.handle = i;
-        current_command_buffer.init( gpu );
+        current_command_buffer.init(gpu);
     }
 
+    // Allocate secondary command buffers.
     u32 handle = total_buffers;
-    for ( u32 pool_index = 0; pool_index < total_pools; ++pool_index ) {
+    for (u32 pool_index = 0; pool_index < total_pools; ++pool_index) {
         VkCommandBufferAllocateInfo cmd = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr };
 
-        cmd.commandPool = vulkan_command_pools[ pool_index ];
+        cmd.commandPool = vulkan_command_pools[pool_index];
+        // Secondary.
         cmd.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
         cmd.commandBufferCount = k_secondary_command_buffers_count;
 
-        VkCommandBuffer secondary_buffers[ k_secondary_command_buffers_count ];
-        vkAllocateCommandBuffers( gpu->vulkan_device, &cmd, secondary_buffers );
+        VkCommandBuffer secondary_buffers[k_secondary_command_buffers_count];
+        vkAllocateCommandBuffers(gpu->vulkan_device, &cmd, secondary_buffers);
 
-        for ( u32 scb_index = 0; scb_index < k_secondary_command_buffers_count; ++scb_index ) {
+        for (u32 scb_index = 0; scb_index < k_secondary_command_buffers_count; ++scb_index) {
             CommandBuffer cb{ };
-            cb.vk_command_buffer = secondary_buffers[ scb_index ];
-
+            cb.vk_command_buffer = secondary_buffers[scb_index];
             cb.handle = handle++;
             cb.init( gpu );
-
-            // NOTE(marco): access to the descriptor pool has to be synchronized
-            // across theads. Don't allow for now
 
             secondary_command_buffers.push( cb );
         }
     }
-
-    //rprint( "Done\n" );
 }
 
 void CommandBufferManager::shutdown() {
@@ -881,11 +894,13 @@ void CommandBufferManager::shutdown() {
     used_secondary_command_buffers.shutdown();
 }
 
-void CommandBufferManager::reset_pools( u32 frame_index ) {
-
-    for ( u32 i = 0; i < num_pools_per_frame; i++ ) {
-        const u32 pool_index = pool_from_indices( frame_index, i );
-        vkResetCommandPool( gpu->vulkan_device, vulkan_command_pools[ pool_index ], 0 );
+// An efficient way to reuse command buffers instead of allocating new ones is to
+// associate one pool with each frame of the swapchain. When the back buffer is
+// presented, its entire command buffer pool can be reset at once.
+void CommandBufferManager::reset_pools(u32 frame_index) {
+    for (u32 i = 0; i < num_pools_per_frame; i++) {
+        const u32 pool_index = pool_from_indices(frame_index, i);
+        vkResetCommandPool(gpu->vulkan_device, vulkan_command_pools[pool_index], 0);
 
         used_buffers[ pool_index ] = 0;
         used_secondary_command_buffers[ pool_index ] = 0;

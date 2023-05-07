@@ -478,8 +478,8 @@ struct glTFDrawTask : public enki::ITaskSet {
 
 }; // struct DrawTask
 
-//
-//
+// Created and scheduled by ObjDrawTask to parallelize the recording of draw commands
+// for a subset of meshes.
 struct SecondaryDrawTask : public enki::ITaskSet {
 
     raptor::Renderer*               renderer    = nullptr;
@@ -533,8 +533,7 @@ struct SecondaryDrawTask : public enki::ITaskSet {
     }
 };
 
-//
-//
+// Records draw commands for a subset of meshes of the scene.
 struct ObjDrawTask : public enki::ITaskSet {
 
     enki::TaskScheduler*            task_scheduler = nullptr;
@@ -558,6 +557,16 @@ struct ObjDrawTask : public enki::ITaskSet {
         use_secondary = use_secondary_;
     }
 
+    // Records drawing commands for a subset of the meshes of the scene. If use_secondary
+    // is true, this subset is further subdivided and assigned to a number of SecondaryDrawTasks
+    // that record, in parallel, drawing commands in secondary command buffers. If false, this
+    // ObjDrawTask records all of the draw commands for the entire subset of meshes directly
+    // in the primary command buffer.
+    //
+    // This ObjDrawTask begins and ends a primary command buffer. If use_secondary is false,
+    // it records all of the commands in the primary command buffer; if true, it records them
+    // in a secondary command buffer for a smaller subset of meshes and schedules SecondaryDrawTasks
+    // that, in turn, record commands in their own secondary command buffers. 
     void ExecuteRange( enki::TaskSetPartition range_, uint32_t threadnum_ ) override {
         ZoneScoped;
 
@@ -566,107 +575,140 @@ struct ObjDrawTask : public enki::ITaskSet {
         thread_id = threadnum_;
 
         //rprint( "Executing draw task from thread %u\n", threadnum_ );
-        // TODO: improve getting a command buffer/pool
-        raptor::CommandBuffer* gpu_commands = gpu->get_command_buffer( threadnum_, true );
-        gpu_commands->push_marker( "Frame" );
 
-        gpu_commands->clear( 0.3f, 0.3f, 0.3f, 1.f );
-        gpu_commands->clear_depth_stencil( 1.0f, 0 );
-        gpu_commands->set_scissor( nullptr );
-        gpu_commands->set_viewport( nullptr );
-        gpu_commands->bind_pass( gpu->get_swapchain_pass(), use_secondary);
+        // Primary command buffer.
+        raptor::CommandBuffer* primary_cmd_buffer = gpu->get_command_buffer( threadnum_, true );
+        primary_cmd_buffer->push_marker( "Frame" );
+        primary_cmd_buffer->clear( 0.3f, 0.3f, 0.3f, 1.f );
+        primary_cmd_buffer->clear_depth_stencil( 1.0f, 0 );
+        primary_cmd_buffer->set_scissor( nullptr );
+        primary_cmd_buffer->set_viewport( nullptr );
 
-        if ( use_secondary ) {
+        // Begins a  render pass. A render pass must begin and end in the same command buffer
+        // (see the primary_cmd_buffer->end_current_render_pass() call made below).
+        primary_cmd_buffer->bind_pass(gpu->get_swapchain_pass(), use_secondary);
+
+        if (use_secondary) {
+            // Subdivide the set of meshes, assign subsets to SecondaryDrawTasks (leaving one
+            // for this ObjDrawTask), and schedule them so that they record draw commands for
+            // them in secondary command buffers in parallel.
+
             static const u32 parallel_recordings = 4;
+
             u32 draws_per_secondary = scene->mesh_draws.size / parallel_recordings;
             u32 offset = draws_per_secondary * parallel_recordings;
 
-            SecondaryDrawTask secondary_tasks[ parallel_recordings ]{ };
+            SecondaryDrawTask secondary_tasks[parallel_recordings]{ };
 
+            // Populate the secondary_tasks array with initialized SecondaryDrawTask. Each one
+            // will draw a subrange of meshes using (parallelizable) secondary command buffers.
             u32 start = 0;
-            for ( u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index ) {
-                SecondaryDrawTask& task = secondary_tasks[ secondary_index ];
+            for (u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index) {
+                SecondaryDrawTask& task = secondary_tasks[secondary_index];
 
-                task.init( scene, renderer, gpu_commands, start, start + draws_per_secondary );
+                // Create SecondaryDrawTasks and schedule them. When it's time for it to run,
+                // SecondaryDrawTask.ExecuteRange() will begin a secondary buffer, record commands
+                // for drawing the assigned set of meshes (including binding the right pipeline
+                // when the material changes), and end the buffer.
+                //
+                // THIS JUST CREATES AND SCHEDULES THE (SECONDARY) TASK. Actual command recording
+                // in the secondary command buffer takes place when the task is given to a thread
+                // to run it.  
+                //
+                // [start, start+draws_per_secondary] is the set of mesh_draws to be 
+                // processed by this task.
+                task.init(scene, renderer, primary_cmd_buffer, start, start + draws_per_secondary);
                 start += draws_per_secondary;
 
-                task_scheduler->AddTaskSetToPipe( &task );
+                task_scheduler->AddTaskSetToPipe(&task);
             }
 
-            CommandBuffer* cb = renderer->gpu->get_secondary_command_buffer( threadnum_ );
+            // THIS TASK ALSO DRAWS ITS ASSIGNED SET OF MESHES, JUST LIKE THE SECONDARY TASKS THAT
+            // IT CREATED AND SCHEDULED ABOVE.
 
-            cb->begin_secondary( gpu_commands->current_render_pass );
+            CommandBuffer* secondary_cmd_buffer = renderer->gpu->get_secondary_command_buffer(threadnum_);
 
-            cb->set_scissor( nullptr );
-            cb->set_viewport( nullptr );
+            // Begin to put secondary command buffers in the primary command buffer
+            // to execute in parallel within the primary's render pass. 
+            secondary_cmd_buffer->begin_secondary(primary_cmd_buffer->current_render_pass);
 
-            Material* last_material = nullptr;
-            // TODO(marco): loop by material so that we can deal with multiple passes
-            for ( u32 mesh_index = offset; mesh_index < scene->mesh_draws.size; ++mesh_index ) {
-                ObjDraw& mesh_draw = scene->mesh_draws[ mesh_index ];
+            secondary_cmd_buffer->set_scissor(nullptr);
+            secondary_cmd_buffer->set_viewport(nullptr);
 
-                if ( mesh_draw.uploads_queued != mesh_draw.uploads_completed ) {
+            Material *last_material = nullptr;
+            for (u32 mesh_index = offset; mesh_index < scene->mesh_draws.size; ++mesh_index) {
+                ObjDraw &mesh_draw = scene->mesh_draws[mesh_index];
+
+                if (mesh_draw.uploads_queued != mesh_draw.uploads_completed) {
+                    // This draw call can't be processed until all of its uploads complete.
                     continue;
                 }
 
-                if ( mesh_draw.material != last_material ) {
-                    PipelineHandle pipeline = renderer->get_pipeline( mesh_draw.material );
+                if (mesh_draw.material != last_material) {
+                    // When the material changes, we need to bind the corresponding pipeline.
 
-                    cb->bind_pipeline( pipeline );
-
+                    PipelineHandle pipeline = renderer->get_pipeline(mesh_draw.material);
+                    secondary_cmd_buffer->bind_pipeline(pipeline);
                     last_material = mesh_draw.material;
                 }
 
-                draw_mesh( *renderer, cb, mesh_draw );
+                // Bind vertex buffers, index buffers, descriptor sets, and record vkCmdDrawIndexed command.
+                draw_mesh(*renderer, secondary_cmd_buffer, mesh_draw);
             }
 
+            // TODO: what are the secondary command buffers executing?
+            for (u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index) {
+                SecondaryDrawTask& task = secondary_tasks[secondary_index];
+                task_scheduler->WaitforTask(&task);
 
-            for ( u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index ) {
-                SecondaryDrawTask& task = secondary_tasks[ secondary_index ];
-                task_scheduler->WaitforTask( &task );
-
-                vkCmdExecuteCommands( gpu_commands->vk_command_buffer, 1, &task.cb->vk_command_buffer );
+                // Executes a secondary command buffer from a primary command buffer.
+                vkCmdExecuteCommands(primary_cmd_buffer->vk_command_buffer, 1, &task.cb->vk_command_buffer);
             }
 
             // NOTE(marco): ImGui also has to use a secondary command buffer, vkCmdExecuteCommands is
             // the only allowed command. We don't need this if we use a different render pass above
-            imgui->render( *cb, true );
+            imgui->render(*secondary_cmd_buffer, true);
 
-            cb->end();
+            secondary_cmd_buffer->end();
 
-            vkCmdExecuteCommands( gpu_commands->vk_command_buffer, 1, &cb->vk_command_buffer );
+            // Executes a secondary command buffer from a primary command buffer.
+            vkCmdExecuteCommands(primary_cmd_buffer->vk_command_buffer, 1, &secondary_cmd_buffer->vk_command_buffer);
 
-            gpu_commands->end_current_render_pass();
+            // A render pass must begin and end in the same command buffer.
+            primary_cmd_buffer->end_current_render_pass();
         } else {
-            Material* last_material = nullptr;
-            // TODO(marco): loop by material so that we can deal with multiple passes
-            for ( u32 mesh_index = 0; mesh_index < scene->mesh_draws.size; ++mesh_index ) {
-                ObjDraw& mesh_draw = scene->mesh_draws[ mesh_index ];
+            // Record draw commands for the assigned set of meshes directly in the primary
+            // command buffer.
 
-                if ( mesh_draw.uploads_queued != mesh_draw.uploads_completed ) {
+            Material* last_material = nullptr;
+
+            for (u32 mesh_index = 0; mesh_index < scene->mesh_draws.size; ++mesh_index) {
+                ObjDraw& mesh_draw = scene->mesh_draws[mesh_index];
+
+                if (mesh_draw.uploads_queued != mesh_draw.uploads_completed) {
                     continue;
                 }
 
-                if ( mesh_draw.material != last_material ) {
-                    PipelineHandle pipeline = renderer->get_pipeline( mesh_draw.material );
+                if (mesh_draw.material != last_material) {
+                    PipelineHandle pipeline = renderer->get_pipeline(mesh_draw.material);
 
-                    gpu_commands->bind_pipeline( pipeline );
+                    primary_cmd_buffer->bind_pipeline(pipeline);
 
                     last_material = mesh_draw.material;
                 }
 
-                draw_mesh( *renderer, gpu_commands, mesh_draw );
+                draw_mesh(*renderer, primary_cmd_buffer, mesh_draw);
             }
 
-            imgui->render( *gpu_commands, false );
+            imgui->render(*primary_cmd_buffer, false);
         }
 
-        gpu_commands->pop_marker();
+        primary_cmd_buffer->pop_marker();
 
-        gpu_profiler->update( *gpu );
+        gpu_profiler->update(*gpu);
 
         // Send commands to GPU
-        gpu->queue_command_buffer( gpu_commands );
+        gpu->queue_command_buffer(primary_cmd_buffer);
     }
 
 }; // struct DrawTask
