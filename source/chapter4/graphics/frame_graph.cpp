@@ -99,6 +99,12 @@ void FrameGraph::parse( cstring file_path, StackAllocator* temp_allocator ) {
     std::string name_value = graph_data.value( "name", "" );
     name = string_buffer.append_use_f( "%s", name_value.c_str() );
 
+    // Passes have nodes and node have inputs and outputs. Inputs and outputs are
+    // resources.
+    //
+    // For each node in each pass, create a FrameGraphNodeCreation with its inputs
+    // and outputs. Then have the builder create a node with it. Store ther resulting
+    // handle in FrameGraph::nodes.
     json passes = graph_data[ "passes" ];
     for ( sizet i = 0; i < passes.size(); ++i ) {
         json pass = passes[ i ];
@@ -110,6 +116,7 @@ void FrameGraph::parse( cstring file_path, StackAllocator* temp_allocator ) {
         node_creation.inputs.init( temp_allocator, pass_inputs.size() );
         node_creation.outputs.init( temp_allocator, pass_outputs.size() );
 
+        // Inputs.
         for ( sizet ii = 0; ii < pass_inputs.size(); ++ii ) {
             json pass_input = pass_inputs[ ii ];
 
@@ -129,6 +136,7 @@ void FrameGraph::parse( cstring file_path, StackAllocator* temp_allocator ) {
             node_creation.inputs.push( input_creation );
         }
 
+        // Outputs.
         for ( sizet oi = 0; oi < pass_outputs.size(); ++oi ) {
             json pass_output = pass_outputs[ oi ];
 
@@ -182,8 +190,10 @@ void FrameGraph::parse( cstring file_path, StackAllocator* temp_allocator ) {
         node_creation.name = string_buffer.append_use_f( "%s", name_value.c_str() );
         node_creation.enabled = enabled;
 
-        FrameGraphNodeHandle node_handle = builder->create_node( node_creation );
-        nodes.push( node_handle );
+        // node_creation stores inputs and outputs. Have the building create a node
+        // with it. Store the resulting handle in FrameGraph::nodes.
+        FrameGraphNodeHandle node_handle = builder->create_node(node_creation);
+        nodes.push(node_handle);
     }
 
     temp_allocator->free_marker( current_allocator_marker );
@@ -785,8 +795,9 @@ FrameGraphResourceHandle FrameGraphBuilder::create_node_input( const FrameGraphR
     return resource_handle;
 }
 
-FrameGraphNodeHandle FrameGraphBuilder::create_node( const FrameGraphNodeCreation& creation )
-{
+// Reserves a FrameGraphNode from the builder's FrameGraphNodeCache and populates it
+// using the input FrameGraphNodeCreation. Returns the handle of that FrameGraphNode. 
+FrameGraphNodeHandle FrameGraphBuilder::create_node(const FrameGraphNodeCreation& creation) {
     FrameGraphNodeHandle node_handle{ k_invalid_index };
     node_handle.index = node_cache.nodes.obtain_resource();
 

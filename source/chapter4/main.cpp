@@ -144,11 +144,14 @@ int main( int argc, char** argv ) {
 
     time_service_init();
 
+    // The builder is given a pointer to the GpuDevice because it is responsible for freeing up
+    // the Vulkan resources of the frame graph.
     FrameGraphBuilder frame_graph_builder;
-    frame_graph_builder.init( &gpu );
+    frame_graph_builder.init(&gpu);
 
+    // The frame graph JSON is later read by FrameGraph::parse.
     FrameGraph frame_graph;
-    frame_graph.init( &frame_graph_builder );
+    frame_graph.init(&frame_graph_builder);
 
     RenderResourcesLoader render_resources_loader;
 
@@ -156,11 +159,14 @@ int main( int argc, char** argv ) {
     {
         sizet scratch_marker = scratch_allocator.get_marker();
 
+        // Read the frame graph JSON file, parse it, allocate FrameGraphNodes
+        // with their input and output resources.
         StringBuffer temporary_name_buffer;
-        temporary_name_buffer.init( 1024, &scratch_allocator );
-        cstring frame_graph_path = temporary_name_buffer.append_use_f( "%s/%s", RAPTOR_WORKING_FOLDER, "graph.json" );
+        temporary_name_buffer.init(1024, &scratch_allocator);
+        cstring frame_graph_path = temporary_name_buffer.append_use_f("%s/%s", RAPTOR_WORKING_FOLDER, "graph.json");
+        frame_graph.parse(frame_graph_path, &scratch_allocator);
 
-        frame_graph.parse( frame_graph_path, &scratch_allocator );
+        // Compute frame graph edges, create framebuffers and render passes.
         frame_graph.compile();
 
         render_resources_loader.init( &renderer, &scratch_allocator, &frame_graph );
@@ -221,7 +227,11 @@ int main( int argc, char** argv ) {
     // NOTE(marco): restore working directory
     directory_change( cwd.path );
 
-    scene->register_render_passes( &frame_graph );
+    // register_render_passes() is implemented by subclasses of RenderScene. In the case,
+    // of glTFScene: depth_pre_pass, gbuffer_pass, lighting_pass, transparent_pass, and
+    // depth_of_field_pass, all of which are subclasses of FrameGraphRenderPass.
+    scene->register_render_passes(&frame_graph);
+
     scene->prepare_draws( &renderer, &scratch_allocator, &scene_graph );
 
     // Start multithreading IO

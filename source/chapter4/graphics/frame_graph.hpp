@@ -175,7 +175,10 @@ struct FrameGraphBuilder : public Service {
     FrameGraphResource*             access_resource( FrameGraphResourceHandle handle );
 
     FrameGraphResourceCache         resource_cache;
+
+    // This node cache has an allocator that is used for allocating FrameGraphNodes.
     FrameGraphNodeCache             node_cache;
+
     FrameGraphRenderPassCache       render_pass_cache;
 
     Allocator*                      allocator;
