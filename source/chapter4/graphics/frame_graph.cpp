@@ -199,14 +199,23 @@ void FrameGraph::parse( cstring file_path, StackAllocator* temp_allocator ) {
     temp_allocator->free_marker( current_allocator_marker );
 }
 
-static void compute_edges( FrameGraph* frame_graph, FrameGraphNode* node, u32 node_index ) {
+// Compute edges of the given node, i.e. find the nodes that produce as outputs the
+// inputs that this node needs; connect those producer nodes with the given node with
+// and edge.
+static void compute_edges(FrameGraph* frame_graph, FrameGraphNode* node, u32 node_index) {
+    // For each input of the node, find the node that outputs it. Connect the
+    // producer node with this node with an edge.
     for ( u32 r = 0; r < node->inputs.size; ++r ) {
-        FrameGraphResource* resource = frame_graph->access_resource( node->inputs[ r ] );
+        // TODO: what's the difference between resource and output_resource? output_resource
+        // is obtained using resource's name.
+        //
+        // The book says: "Note that internally, the graph stores the outputs in a map keyed by name".
+        // So FrameGraph::get_resource() retrieves output resources exclusively.
+        FrameGraphResource* resource = frame_graph->access_resource(node->inputs[r]);
 
-        FrameGraphResource* output_resource = frame_graph->get_resource( resource->name );
-        if ( output_resource == nullptr && !resource->resource_info.external ) {
-            // TODO(marco): external resources
-            RASSERTM( false, "Requested resource is not produced by any node and is not external." );
+        FrameGraphResource* output_resource = frame_graph->get_resource(resource->name);
+        if (output_resource == nullptr && !resource->resource_info.external) {
+            RASSERTM(false, "Requested resource is not produced by any node and is not external.");
             continue;
         }
 
@@ -214,11 +223,12 @@ static void compute_edges( FrameGraph* frame_graph, FrameGraphNode* node, u32 no
         resource->resource_info = output_resource->resource_info;
         resource->output_handle = output_resource->output_handle;
 
-        FrameGraphNode* parent_node = frame_graph->access_node( resource->producer );
+        FrameGraphNode* parent_node = frame_graph->access_node(resource->producer);
 
         // rprint( "Adding edge from %s [%d] to %s [%d]\n", parent_node->name, resource->producer.index, node->name, node_index )
 
-        parent_node->edges.push( frame_graph->nodes[ node_index ] );
+        // Create an edge from the producer (parent) node to this node.
+        parent_node->edges.push(frame_graph->nodes[node_index]);
     }
 }
 
@@ -351,6 +361,8 @@ void FrameGraph::disable_render_pass( cstring render_pass_name ) {
     node->enabled = false;
 }
 
+// Computes the edges between nodes of the frame graph. When the frame graph is parsed,
+// only nodes are created. Here, edges are determined based on nodes' inputs and outputs.
 void FrameGraph::compile() {
     // TODO(marco)
     // - check that input has been produced by a different node
@@ -364,26 +376,33 @@ void FrameGraph::compile() {
         node->edges.clear();
     }
 
-    for ( u32 i = 0; i < nodes.size; ++i ) {
-        FrameGraphNode* node = builder->access_node( nodes[ i ] );
-        if ( !node->enabled ) {
+    // Compute edges.
+    for (u32 i = 0; i < nodes.size; ++i) {
+        FrameGraphNode* node = builder->access_node(nodes[i]);
+        if (!node->enabled) {
             continue;
         }
 
-        compute_edges( this, node, i );
+        // Upon return, all the nodes that output a resource that this node needs will
+        // have a connecting edge with this node.
+        compute_edges(this, node, i);
     }
 
+    // Different arrays used in the sorting operation.
     Array<FrameGraphNodeHandle> sorted_nodes;
-    sorted_nodes.init( &local_allocator, nodes.size );
-
+    sorted_nodes.init(&local_allocator, nodes.size);
     Array<u8> visited;
-    visited.init( &local_allocator, nodes.size, nodes.size );
-    memset( visited.data, 0, sizeof( bool ) * nodes.size );
-
+    visited.init(&local_allocator, nodes.size, nodes.size);
+    memset(visited.data, 0, sizeof(bool) * nodes.size);
     Array<FrameGraphNodeHandle> stack;
-    stack.init( &local_allocator, nodes.size );
+    stack.init(&local_allocator, nodes.size);
 
-    // Topological sorting
+    // "Topological" sort of the frame DAG. A topological sort or topological ordering of
+    // a directed graph is a linear ordering of its vertices such that for every directed
+    // edge uv from vertex u to vertex v, u comes before v in the ordering.
+    //
+    // Having nodes listed in topological order is essential for memory aliasing, because
+    // we need to identify the node that first outputs each resource.
     for ( u32 n = 0; n < nodes.size; ++n ) {
         FrameGraphNode* node = builder->access_node( nodes[ n ] );
         if ( !node->enabled ) {
@@ -432,107 +451,168 @@ void FrameGraph::compile() {
 
     RASSERT( sorted_nodes.size == nodes.size );
 
+    // Reset the unordered list of nodes. Insert them back in topological order.
     nodes.clear();
-
-    for ( i32 i = sorted_nodes.size - 1; i >= 0; --i ) {
-        nodes.push( sorted_nodes[ i ] );
+    for (i32 i = sorted_nodes.size - 1; i >= 0; --i) {
+        nodes.push(sorted_nodes[i]);
     }
 
     visited.shutdown();
     stack.shutdown();
     sorted_nodes.shutdown();
 
-    // NOTE(marco): allocations and deallocations are used for verification purposes only
+    // Do memory aliasing. Multiple *different* resources declared in the graph can
+    // point to the same memory allocation. This is possible when these resources don't
+    // coexist in time, that is, two resources may be declared to point to the same
+    // memory allocation, but one of them uses it first and then the other.
+    //
+    // To that end, the frame graph is analyzed to determine which resources reside
+    // in memory simultaneously; when they do, they can't share memory allocations.
+    //
+    // For each resource, we need to determine which node outputs it for the first time
+    // and which is the last node that receives it as input. The allocations array
+    // records the node that outputs a given resource first and the deallocations array
+    // records the last node that receives it as input.
+    //
+    // Note that topological sorting is essential for doing this. At each step (node)
+    // of the traversal, we know which resources haven't been allocated, which ones
+    // have been allocated but not deallocated yet, and which ones have been allocated
+    // and then deallocated, becoming free for reuse at subsequent steps. 
+
+    // The allocations array has an entry for each resource; the entry will store
+    // the handle of the node that outputs that resource FIRST. This array allows us
+    // to determine at each step (node) of the topological travesal, whether a given
+    // resource has been allocated already.
     sizet resource_count = builder->resource_cache.resources.used_indices;
     Array<FrameGraphNodeHandle> allocations;
-    allocations.init( &local_allocator, resource_count, resource_count );
-    for ( u32 i = 0; i < resource_count; ++i) {
-        allocations[ i ].index = k_invalid_index;
+    allocations.init(&local_allocator, resource_count, resource_count);
+    for (u32 i = 0; i < resource_count; ++i) {
+        allocations[i].index = k_invalid_index;
     }
 
+    // The deallocations array has an entry for each resource; the entry will store
+    // the handle of the last node that receives it as input. This array allows us
+    // to determine at each step (node) of the topological traversal, whether a given
+    // resource has been deallocated already (and thus available for reuse at
+    // subsequent steps).
     Array<FrameGraphNodeHandle> deallocations;
     deallocations.init( &local_allocator, resource_count, resource_count );
     for ( u32 i = 0; i < resource_count; ++i) {
         deallocations[ i ].index = k_invalid_index;
     }
 
+    // Throughout the topological traversal, an output resource that is encountered
+    // for the first time will be allocated either from scratch or reuse a free
+    // resource. When that output resource gets deallocated, it becomes free for
+    // reuse at subsequent steps.
     Array<TextureHandle> free_list;
-    free_list.init( &local_allocator, resource_count );
+    free_list.init(&local_allocator, resource_count);
 
-    size_t peak_memory = 0;
-    size_t instant_memory = 0;
-
-    for ( u32 i = 0; i < nodes.size; ++i ) {
-        FrameGraphNode* node = builder->access_node( nodes[ i ] );
-        if ( !node->enabled ) {
+    // Increase the reference count of each output resource: number of inputs that
+    // refer to it.
+    for (u32 i = 0; i < nodes.size; ++i) {
+        FrameGraphNode* node = builder->access_node(nodes[i]);
+        if (!node->enabled) {
             continue;
         }
 
-        for ( u32 j = 0; j < node->inputs.size; ++j ) {
-            FrameGraphResource* input_resource = builder->access_resource( node->inputs[ j ] );
-            FrameGraphResource* resource = builder->access_resource( input_resource->output_handle );
-
+        for (u32 j = 0; j < node->inputs.size; ++j) {
+            FrameGraphResource *input_resource = builder->access_resource(node->inputs[j]);
+            FrameGraphResource *resource = builder->access_resource(input_resource->output_handle);
             resource->ref_count++;
         }
     }
 
-    for ( u32 i = 0; i < nodes.size; ++i ) {
-        FrameGraphNode* node = builder->access_node( nodes[ i ] );
-        if ( !node->enabled ) {
+    // Traverse the graph in topological order. 
+    for (u32 i = 0; i < nodes.size; ++i) {
+        FrameGraphNode *node = builder->access_node(nodes[i]);
+        if (!node->enabled) {
             continue;
         }
 
-        for ( u32 j = 0; j < node->outputs.size; ++j ) {
-            u32 resource_index = node->outputs[ j ].index;
-            FrameGraphResource* resource = builder->access_resource( node->outputs[ j ] );
+        // For each output resource of this node, determine if this node is the first
+        // one that outputs it; if so, either create the resource from scratch or reuse
+        // a free one if available. (A resource becomes available for reuse when it's
+        // reference count drops to 0; note that this may happen more than once throughout
+        // the topological traversal.) When a resource reuses a free resource, we call it
+        // an alias.
+        for (u32 j = 0; j < node->outputs.size; ++j) {
+            u32 resource_index = node->outputs[j].index;
+            FrameGraphResource* resource = builder->access_resource(node->outputs[j]);
 
-            if ( !resource->resource_info.external && allocations[ resource_index ].index == k_invalid_index ) {
-                RASSERT( deallocations[ resource_index ].index == k_invalid_index )
-                allocations[ resource_index ] = nodes[ i ];
+            if (!resource->resource_info.external && allocations[resource_index].index == k_invalid_index) {
+                // There shouldn't be a deallocation for this output resource yet.
+                RASSERT(deallocations[resource_index].index == k_invalid_index)
 
-                if ( resource->type == FrameGraphResourceType_Attachment ) {
-                    FrameGraphResourceInfo& info = resource->resource_info;
+                // This node allocates this resource.
+                allocations[resource_index] = nodes[i];
 
-                    if ( free_list.size > 0 ) {
-                        // TODO(marco): find best fit
+                if (resource->type == FrameGraphResourceType_Attachment) {
+                    FrameGraphResourceInfo &info = resource->resource_info;
+
+                    if (free_list.size > 0) {
+                        // A memory allocation can be reused to create this resource.
                         TextureHandle alias_texture = free_list.back();
                         free_list.pop();
 
-                        TextureCreation texture_creation{ };
-                        texture_creation.set_data( nullptr ).set_alias( alias_texture ).set_name( resource->name ).set_format_type( info.texture.format, TextureType::Enum::Texture2D ).set_size( info.texture.width, info.texture.height, info.texture.depth ).set_flags( 1, TextureFlags::RenderTarget_mask );
-                        TextureHandle handle = builder->device->create_texture( texture_creation );
+                        TextureCreation texture_creation{};
+                        texture_creation
+                        .set_data(nullptr)
+                        // This resource is considered an alias because this memory allocation existed
+                        // before under another name.
+                        .set_alias(alias_texture)
+                        // This memory allocation used to go by another name.
+                        .set_name(resource->name)
+                        .set_format_type(info.texture.format, TextureType::Enum::Texture2D)
+                        .set_size(info.texture.width, info.texture.height, info.texture.depth)
+                        .set_flags(1, TextureFlags::RenderTarget_mask);
+                        TextureHandle handle = builder->device->create_texture(texture_creation);
 
                         info.texture.texture = handle;
                     } else {
-                        TextureCreation texture_creation{ };
-                        texture_creation.set_data( nullptr ).set_name( resource->name ).set_format_type( info.texture.format, TextureType::Enum::Texture2D ).set_size( info.texture.width, info.texture.height, info.texture.depth ).set_flags( 1, TextureFlags::RenderTarget_mask );
-                        TextureHandle handle = builder->device->create_texture( texture_creation );
+                        // No available memory allocations to reuse for the creation of this resource.
+                        TextureCreation texture_creation{};
+                        texture_creation
+                        .set_data(nullptr)
+                        // First name given to this memory allocation.
+                        .set_name(resource->name)
+                        .set_format_type(info.texture.format, TextureType::Enum::Texture2D)
+                        .set_size(info.texture.width, info.texture.height, info.texture.depth)
+                        .set_flags(1, TextureFlags::RenderTarget_mask);
+                        TextureHandle handle = builder->device->create_texture(texture_creation);
 
                         info.texture.texture = handle;
                     }
                 }
 
-                rprint( "Output %s allocated on node %d\n", resource->name, nodes[ i ].index );
+                rprint("Output %s allocated on node %d\n", resource->name, nodes[i].index);
             }
         }
 
-        for ( u32 j = 0; j < node->inputs.size; ++j ) {
-            FrameGraphResource* input_resource = builder->access_resource( node->inputs[ j ] );
+        // For each input resource of this node, determine if it's the last one that's currently
+        // consuming it. If so, record this node in the deallocations entry of the resource and
+        // put the resource in the free_list; subsequent nodes in this topological traversal
+        // can reuse the resource's memory allocation.
+        for (u32 j = 0; j < node->inputs.size; ++j) {
+            FrameGraphResource *input_resource = builder->access_resource(node->inputs[j]);
 
             u32 resource_index = input_resource->output_handle.index;
-            FrameGraphResource* resource = builder->access_resource( input_resource->output_handle );
+            FrameGraphResource *resource = builder->access_resource(input_resource->output_handle);
 
+            // Decrease the reference count of the output resource. When it reaches 0, this node
+            // is the last one that is currently consuming it.
             resource->ref_count--;
+            if (!resource->resource_info.external && resource->ref_count == 0) {
+                // This is the last node that consumes this resource.
+                RASSERT(deallocations[resource_index].index == k_invalid_index);
+                deallocations[resource_index] = nodes[i];
 
-            if ( !resource->resource_info.external && resource->ref_count == 0 ) {
-                RASSERT( deallocations[ resource_index ].index == k_invalid_index );
-                deallocations[ resource_index ] = nodes[ i ];
-
-                if ( resource->type == FrameGraphResourceType_Attachment || resource->type == FrameGraphResourceType_Texture ) {
-                    free_list.push( resource->resource_info.texture.texture );
+                if (resource->type == FrameGraphResourceType_Attachment || resource->type == FrameGraphResourceType_Texture) {
+                    // Make this resource's memory allocation available for subsequent nodes.
+                    free_list.push(resource->resource_info.texture.texture);
                 }
 
-                rprint( "Output %s deallocated on node %d\n", resource->name, nodes[ i ].index );
+                rprint("Output %s deallocated on node %d\n", resource->name, nodes[i].index);
             }
         }
     }
