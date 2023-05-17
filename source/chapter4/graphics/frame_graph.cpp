@@ -648,11 +648,10 @@ void FrameGraph::add_ui() {
     }
 }
 
-void FrameGraph::render( CommandBuffer* gpu_commands, RenderScene* render_scene )
-{
-    for ( u32 n = 0; n < nodes.size; ++n ) {
-        FrameGraphNode* node = builder->access_node( nodes[ n ] );
-        if ( !node->enabled ) {
+void FrameGraph::render(CommandBuffer *gpu_commands, RenderScene *render_scene) {
+    for (u32 n = 0; n < nodes.size; ++n) {
+        FrameGraphNode *node = builder->access_node(nodes[n]);
+        if (!node->enabled) {
             continue;
         }
 
@@ -664,55 +663,90 @@ void FrameGraph::render( CommandBuffer* gpu_commands, RenderScene* render_scene 
         u32 width = 0;
         u32 height = 0;
 
-        for ( u32 i = 0; i < node->inputs.size; ++i ) {
-            FrameGraphResource* resource = builder->access_resource( node->inputs[ i ] );
+        // Process all the node's inputs.
+        for (u32 i = 0; i < node->inputs.size; ++i) {
+            FrameGraphResource *resource = builder->access_resource(node->inputs[i]);
 
-            if ( resource->type == FrameGraphResourceType_Texture ) {
-                Texture* texture = gpu_commands->device->access_texture( resource->resource_info.texture.texture );
+            if (resource->type == FrameGraphResourceType_Texture) {
+                Texture *texture = gpu_commands->device->access_texture(resource->resource_info.texture.texture);
 
-                util_add_image_barrier( gpu_commands->vk_command_buffer, texture->vk_image, RESOURCE_STATE_RENDER_TARGET, RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 1, resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT );
+                // Insert a barrier to transition the input resource from an attachment layout
+                // (for use as a render target) to a shader stage layout (for use in a fragment shader).
+                util_add_image_barrier(
+                    gpu_commands->vk_command_buffer,
+                    texture->vk_image,
+                    RESOURCE_STATE_RENDER_TARGET,
+                    RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    0,
+                    1,
+                    resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT
+                );
             } else if ( resource->type == FrameGraphResourceType_Attachment ) {
                 Texture* texture = gpu_commands->device->access_texture( resource->resource_info.texture.texture );
 
+                // These dimensions will determine the dimensions of the scissors and viewport.
                 width = texture->width;
                 height = texture->height;
             }
         }
 
-        for ( u32 o = 0; o < node->outputs.size; ++o ) {
-            FrameGraphResource* resource = builder->access_resource( node->outputs[ o ] );
+        // Process the node's outputs.
+        for (u32 o = 0; o < node->outputs.size; ++o) {
+            FrameGraphResource *resource = builder->access_resource(node->outputs[o]);
 
-            if ( resource->type == FrameGraphResourceType_Attachment ) {
-                Texture* texture = gpu_commands->device->access_texture( resource->resource_info.texture.texture );
+            if (resource->type == FrameGraphResourceType_Attachment) {
+                // Resouce will be used as an attachment to a render pass.
+
+                Texture *texture = gpu_commands->device->access_texture(resource->resource_info.texture.texture);
 
                 width = texture->width;
                 height = texture->height;
 
-                if ( texture->vk_format == VK_FORMAT_D32_SFLOAT ) {
-                    util_add_image_barrier( gpu_commands->vk_command_buffer, texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_DEPTH_WRITE, 0, 1, resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT );
+                if (texture->vk_format == VK_FORMAT_D32_SFLOAT) {
+                    // The resource is a depth buffer.
+                    util_add_image_barrier(
+                        gpu_commands->vk_command_buffer,
+                        texture->vk_image,
+                        RESOURCE_STATE_UNDEFINED,
+                        RESOURCE_STATE_DEPTH_WRITE,
+                        0,
+                        1,
+                        resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT
+                    );
                 } else {
-                    util_add_image_barrier( gpu_commands->vk_command_buffer, texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_RENDER_TARGET, 0, 1, resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT );
+                    // The resource is a render target.
+                    util_add_image_barrier(
+                        gpu_commands->vk_command_buffer,
+                        texture->vk_image,
+                        RESOURCE_STATE_UNDEFINED,
+                        RESOURCE_STATE_RENDER_TARGET,
+                        0,
+                        1,
+                        resource->resource_info.texture.format == VK_FORMAT_D32_SFLOAT
+                    );
                 }
             }
         }
 
-        Rect2DInt scissor{ 0, 0,( u16 )width, ( u16 )height };
-        gpu_commands->set_scissor( &scissor );
+        // Set scissor's dimensions.
+        Rect2DInt scissor{ 0, 0, (u16) width, (u16) height };
+        gpu_commands->set_scissor(&scissor);
 
+        // Set viewport's dimensions.
         Viewport viewport{ };
-        viewport.rect = { 0, 0, ( u16 )width, ( u16 )height };
+        viewport.rect = { 0, 0, (u16) width, (u16) height };
         viewport.min_depth = 0.0f;
         viewport.max_depth = 1.0f;
+        gpu_commands->set_viewport(&viewport);
 
-        gpu_commands->set_viewport( &viewport );
+        // Nodes might have actions that need to be performed before the render pass is done.
+        node->graph_render_pass->pre_render(gpu_commands, render_scene);
 
-        node->graph_render_pass->pre_render( gpu_commands, render_scene );
-
-        gpu_commands->bind_pass( node->render_pass, node->framebuffer, false );
-
-        node->graph_render_pass->render( gpu_commands, render_scene );
-
+        // Bind and execute the render pass of this node. 
+        gpu_commands->bind_pass(node->render_pass, node->framebuffer, false);
+        node->graph_render_pass->render(gpu_commands, render_scene);
         gpu_commands->end_current_render_pass();
+
         gpu_commands->pop_marker();
     }
 }
