@@ -292,7 +292,7 @@ void glTFScene::init( cstring filename, cstring path, Allocator* resident_alloca
 
     i64 end_reading_buffers_data = time_now();
 
-    // Build meshlets
+    // Build meshlets. Meshlet make occlusion and frustum culling more efficient.
     const sizet max_vertices = 64;
     const sizet max_triangles = 124;
     const f32 cone_weight = 0.0f;
@@ -407,80 +407,123 @@ void glTFScene::init( cstring filename, cstring path, Allocator* resident_alloca
 
             mesh.gpu_mesh_index = meshes.size;
 
+            // meshopt_buildMeshletsBound is from github.com/zeux/meshoptimizer.
             const sizet max_meshlets = meshopt_buildMeshletsBound( indices_accessor.count, max_vertices, max_triangles );
             sizet temp_marker = temp_allocator->get_marker();
 
             Array<meshopt_Meshlet> local_meshlets;
             local_meshlets.init( temp_allocator, max_meshlets, max_meshlets );
 
+            // These are indices into the original vertex buffer. max_vertices = 64 is the
+            // maximum number of vertices per meshlet that is recommended for the Vulkan API.
             Array<u32> meshlet_vertex_indices;
             meshlet_vertex_indices.init( temp_allocator, max_meshlets * max_vertices, max_meshlets* max_vertices );
 
+            // These are indices into the original index buffer. max_triangles = 124 is the
+            // maximum number of triangles per meshlet that is recommended for the Vulkan API.
             Array<u8> meshlet_triangles;
             meshlet_triangles.init( temp_allocator, max_meshlets * max_triangles * 3, max_meshlets* max_triangles * 3 );
 
-            sizet meshlet_count = meshopt_buildMeshlets( local_meshlets.data, meshlet_vertex_indices.data, meshlet_triangles.data, indices,
-                                                         indices_accessor.count, vertices, position_buffer_accessor.count, sizeof( vec3s ),
-                                                         max_vertices, max_triangles, cone_weight );
+            // meshopt_buildMeshlets, from github.com/zeux/meshoptimizer, creates meshlets.
+            //
+            // A meshlet looks like this:
+            //
+            // struct meshopt_Meshlet {
+            //  unsigned int vertex_offset;    (Offset into meshlet_vertex_indices.)
+            //  unsigned int triangle_offset;  (Offset into meshlet_triangles.)
+            //  unsigned int vertex_count;
+            //  unsigned int triangle_count;
+            // };
+            sizet meshlet_count = meshopt_buildMeshlets(
+                local_meshlets.data,
+                meshlet_vertex_indices.data,
+                meshlet_triangles.data,
+                indices,
+                indices_accessor.count,
+                vertices,
+                position_buffer_accessor.count,
+                sizeof(vec3s),
+                max_vertices,
+                max_triangles,
+                cone_weight
+            );
 
             u32 meshlet_vertex_offset = meshlets_vertex_positions.size;
-            for ( u32 v = 0; v < position_buffer_accessor.count; ++v ) {
+            for (u32 v = 0; v < position_buffer_accessor.count; ++v) {
                 GpuMeshletVertexPosition meshlet_vertex_pos{ };
 
-                meshlet_vertex_pos.position[ 0 ] = vertices[ v * 3 + 0 ];
-                meshlet_vertex_pos.position[ 1 ] = vertices[ v * 3 + 1 ];
-                meshlet_vertex_pos.position[ 2 ] = vertices[ v * 3 + 2 ];
+                meshlet_vertex_pos.position[0] = vertices[v * 3 + 0];
+                meshlet_vertex_pos.position[1] = vertices[v * 3 + 1];
+                meshlet_vertex_pos.position[2] = vertices[v * 3 + 2];
 
-                meshlets_vertex_positions.push( meshlet_vertex_pos );
+                meshlets_vertex_positions.push(meshlet_vertex_pos);
 
+                // Normal, tangent, and UV coordinate.
                 GpuMeshletVertexData meshlet_vertex_data{ };
 
-                if ( normals != nullptr ) {
-                    meshlet_vertex_data.normal[ 0 ] = ( normals[ v * 3 + 0 ] + 1.0f ) * 127.0f;
-                    meshlet_vertex_data.normal[ 1 ] = ( normals[ v * 3 + 1 ] + 1.0f ) * 127.0f;
-                    meshlet_vertex_data.normal[ 2 ] = ( normals[ v * 3 + 2 ] + 1.0f ) * 127.0f;
+                if (normals != nullptr) {
+                    // GpuMeshletVertexData.normal is u8[4].
+                    // Compress each dimension of the normal vector from f32 down to u8 (1-byte integer).
+                    // (This method is called quantization.)
+                    meshlet_vertex_data.normal[0] = (normals[v * 3 + 0] + 1.0f) * 127.0f;
+                    meshlet_vertex_data.normal[1] = (normals[v * 3 + 1] + 1.0f) * 127.0f;
+                    meshlet_vertex_data.normal[2] = (normals[v * 3 + 2] + 1.0f) * 127.0f;
                 }
 
-                if ( tangents != nullptr ) {
-                    meshlet_vertex_data.tangent[ 0 ] = ( tangents[ v * 3 + 0 ] + 1.0f ) * 127.0f;
-                    meshlet_vertex_data.tangent[ 1 ] = ( tangents[ v * 3 + 1 ] + 1.0f ) * 127.0f;
-                    meshlet_vertex_data.tangent[ 2 ] = ( tangents[ v * 3 + 2 ] + 1.0f ) * 127.0f;
-                    meshlet_vertex_data.tangent[ 3 ] = ( tangents[ v * 3 + 3 ] + 1.0f ) * 127.0f;
+                if (tangents != nullptr) {
+                    // GpuMeshletVertexData.tangent is u8[4].
+                    // Compress each dimension of the tangent vector from f32 down to u8 (1-byte integer).
+                    // (This method is called quantization.)
+                    meshlet_vertex_data.tangent[0] = (tangents[v * 3 + 0] + 1.0f) * 127.0f;
+                    meshlet_vertex_data.tangent[1] = (tangents[v * 3 + 1] + 1.0f) * 127.0f;
+                    meshlet_vertex_data.tangent[2] = (tangents[v * 3 + 2] + 1.0f) * 127.0f;
+                    meshlet_vertex_data.tangent[3] = (tangents[v * 3 + 3] + 1.0f) * 127.0f;
                 }
 
-                meshlet_vertex_data.uv_coords[ 0 ] = meshopt_quantizeHalf( tex_coords[ v * 2 + 0 ] );
-                meshlet_vertex_data.uv_coords[ 1 ] = meshopt_quantizeHalf( tex_coords[ v * 2 + 1 ] );
+                // GpuMeshletVertexData.uv_coords is u16[4].
+                // Compress each dimension of the UV coordinate from f32 down to u16.
+                meshlet_vertex_data.uv_coords[0] = meshopt_quantizeHalf(tex_coords[v * 2 + 0]);
+                meshlet_vertex_data.uv_coords[1] = meshopt_quantizeHalf(tex_coords[v * 2 + 1]);
 
                 meshlets_vertex_data.push( meshlet_vertex_data );
             }
 
-            // Cache meshlet offset
             mesh.meshlet_offset = meshlets.size;
             mesh.meshlet_count = meshlet_count;
 
-            meshes.push( mesh );
+            meshes.push(mesh);
 
-            // Append meshlet data
-            for ( u32 m = 0; m < meshlet_count; ++m ) {
-                meshopt_Meshlet& local_meshlet = local_meshlets[ m ];
+            // Create GpuMeshlets and put them in meshlets array.
+            for (u32 m = 0; m < meshlet_count; ++m) {
+                meshopt_Meshlet& local_meshlet = local_meshlets[m];
 
-                meshopt_Bounds meshlet_bounds = meshopt_computeMeshletBounds(meshlet_vertex_indices.data + local_meshlet.vertex_offset,
-                                                                             meshlet_triangles.data + local_meshlet.triangle_offset, local_meshlet.triangle_count,
-                                                                             vertices, position_buffer_accessor.count, sizeof( vec3s ));
+                // Meshlet's bounding sphere.
+                meshopt_Bounds meshlet_bounds = meshopt_computeMeshletBounds(
+                    meshlet_vertex_indices.data + local_meshlet.vertex_offset,
+                    meshlet_triangles.data + local_meshlet.triangle_offset,
+                    local_meshlet.triangle_count,
+                    vertices,
+                    position_buffer_accessor.count,
+                    sizeof(vec3s)
+                );
 
                 GpuMeshlet meshlet{};
                 meshlet.data_offset = meshlets_data.size;
                 meshlet.vertex_count = local_meshlet.vertex_count;
                 meshlet.triangle_count = local_meshlet.triangle_count;
 
-                meshlet.center = vec3s{ meshlet_bounds.center[ 0 ], meshlet_bounds.center[ 1 ], meshlet_bounds.center[ 2 ] };
+                // Meshlet's bounding sphere.
+                meshlet.center = vec3s{ meshlet_bounds.center[0], meshlet_bounds.center[1], meshlet_bounds.center[2] };
                 meshlet.radius = meshlet_bounds.radius;
 
-                meshlet.cone_axis[ 0 ] = meshlet_bounds.cone_axis_s8[ 0 ];
-                meshlet.cone_axis[ 1 ] = meshlet_bounds.cone_axis_s8[ 1 ];
-                meshlet.cone_axis[ 2 ] = meshlet_bounds.cone_axis_s8[ 2 ];
-
+                // Meshlet's orientation cone.
+                meshlet.cone_axis[0] = meshlet_bounds.cone_axis_s8[0];
+                meshlet.cone_axis[1] = meshlet_bounds.cone_axis_s8[1];
+                meshlet.cone_axis[2] = meshlet_bounds.cone_axis_s8[2];
                 meshlet.cone_cutoff = meshlet_bounds.cone_cutoff_s8;
+
+                // Index of the mesh to which this meshlet belongs. Note that the mesh this
+                // meshlet belongs to was just pushed onto the meshes array.
                 meshlet.mesh_index = meshes.size - 1;
 
                 // Resize data array
@@ -500,7 +543,7 @@ void glTFScene::init( cstring filename, cstring path, Allocator* resident_alloca
                     meshlets_data.push( index_group );
                 }
 
-                meshlets.push( meshlet );
+                meshlets.push(meshlet);
             }
 
             while ( meshlets.size % 32 )
