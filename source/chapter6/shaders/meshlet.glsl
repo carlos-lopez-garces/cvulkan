@@ -241,8 +241,9 @@ void main() {
 #endif
 }
 
-#endif // TASK
+#endif // Task shader.
 
+// Mesh shader.
 
 #if defined(MESH_GBUFFER_CULLING) || defined(MESH_MESH) || defined(MESH_TRANSPARENT_NO_CULL)
 
@@ -254,18 +255,22 @@ layout(set = MATERIAL_SET, binding = 1) readonly buffer Meshlets
     Meshlet meshlets[];
 };
 
-layout(set = MATERIAL_SET, binding = 3) readonly buffer MeshletData
-{
+// Vertex indices followed by triangle indices of a given meshlet. These
+// vertex indices are used to index into VertexPositions=>vertex_positions
+// and VertexData=>vertex_data.
+layout(set = MATERIAL_SET, binding = 3) readonly buffer MeshletData {
     uint meshletData[];
 };
 
-layout(set = MATERIAL_SET, binding = 4) readonly buffer VertexPositions
-{
+// Position vectors for meshlet vertices. Indexed using vertex indices found
+// in MeshletData=>meshletData.
+layout(set = MATERIAL_SET, binding = 4) readonly buffer VertexPositions {
     VertexPosition vertex_positions[];
 };
 
-layout(set = MATERIAL_SET, binding = 5) readonly buffer VertexData
-{
+// Other data for meshlet vertices, such as normal, tangent, and UVs. Indexed
+// using vertex indices found in MeshletData=>meshletData.
+layout(set = MATERIAL_SET, binding = 5) readonly buffer VertexData {
     VertexExtraData vertex_data[];
 };
 
@@ -293,7 +298,13 @@ in taskNV block {
     uint meshletIndices[32];
 };
 
+// Mesh shaders play the role of vertex shaders, for meshlets.
+// These are the usual outputs of a vertex shader. Note, however,
+// that these all are arrays, since a mesh shader can output up to
+// 64 vertices per invocation.
 layout (location = 0) out vec2 vTexcoord0[];
+// The bitangent vector's components are spread across the w components of
+// the normal, tangent, and position vectors.
 layout (location = 1) out vec4 vNormal_BiTanX[];
 layout (location = 2) out vec4 vTangent_BiTanY[];
 layout (location = 3) out vec4 vPosition_BiTanZ[];
@@ -314,17 +325,26 @@ uint hash(uint a)
    return a;
 }
 
-void main()
-{
+void main() {
+    // gl_LocalInvocationID contains the n-dimensional index of the local work
+    // invocation within the work group that the current shader is executing in.
+    //
+    // ti is thread index.
     uint ti = gl_LocalInvocationID.x;
+
+    // Index of visible meshlet (from the output of the task shader).
     uint mi = meshletIndices[gl_WorkGroupID.x];
 
-    MeshDraw mesh_draw = mesh_draws[ meshlets[mi].mesh_index ];
+    MeshDraw mesh_draw = mesh_draws[meshlets[mi].mesh_index];
 
     uint vertexCount = uint(meshlets[mi].vertexCount);
     uint triangleCount = uint(meshlets[mi].triangleCount);
     uint indexCount = triangleCount * 3;
 
+    // The meshletData buffer is an array where vertex indices appear first
+    // (i.e. the vertex buffer), followed by triangle indices (i.e. the index buffer).
+    // 
+    // vertexOffset and indexOffset mark their respective start indices in meshletData.
     uint dataOffset = meshlets[mi].dataOffset;
     uint vertexOffset = dataOffset;
     uint indexOffset = dataOffset + vertexCount;
@@ -339,46 +359,49 @@ void main()
     vec3 mcolor = vec3(float(mhash & 255), float((mhash >> 8) & 255), float((mhash >> 16) & 255)) / 255.0;
 #endif
 
+    // Determine current draw being processed. Corresponds to a draw command recorded
+    // with vkCmdDrawMeshTasksNV().
 #if defined(MESH_TRANSPARENT_NO_CULL)
     uint mesh_instance_index = draw_commands[gl_DrawIDARB + total_count].drawId;
 #else
     uint mesh_instance_index = draw_commands[gl_DrawIDARB].drawId;
 #endif
 
+    // Model matrix and its inverse. (Used to transform meshlet vertices from model space to world space.)
     mat4 model = mesh_instance_draws[mesh_instance_index].model;
     mat4 model_inverse = mesh_instance_draws[mesh_instance_index].model_inverse;
 
-    // TODO: if we have meshlets with 62 or 63 vertices then we pay a small penalty for branch divergence here - we can instead redundantly xform the last vertex
-    for (uint i = ti; i < vertexCount; i += 32)
-    {
-        uint vi = meshletData[vertexOffset + i];// + mesh_draw.vertexOffset;
+    // Note that this thread (ti, thread index) processes only some of the vertices.
+    for (uint i = ti; i < vertexCount; i += 32) {
+        // Index of vertex to process.
+        uint vi = meshletData[vertexOffset + i];
 
         vec3 position = vec3(vertex_positions[vi].v.x, vertex_positions[vi].v.y, vertex_positions[vi].v.z);
 
-        if ( has_normals ) {
+        if (has_normals) {
             vec3 normal = vec3(int(vertex_data[vi].nx), int(vertex_data[vi].ny), int(vertex_data[vi].nz)) * i8_inverse - 1.0;
-            vNormal_BiTanX[ i ].xyz = normalize( mat3(model_inverse) * normal );
+            vNormal_BiTanX[i].xyz = normalize(mat3(model_inverse) * normal);
         }
 
-        if ( has_tangents ) {
+        if (has_tangents) {
             vec3 tangent = vec3(int(vertex_data[vi].tx), int(vertex_data[vi].ty), int(vertex_data[vi].tz)) * i8_inverse - 1.0;
-            vTangent_BiTanY[ i ].xyz = normalize( mat3(model) * tangent.xyz );
+            vTangent_BiTanY[i].xyz = normalize(mat3(model) * tangent.xyz);
 
-            vec3 bitangent = cross( vNormal_BiTanX[ i ].xyz, tangent.xyz ) * ( int(vertex_data[vi].tw) * i8_inverse  - 1.0 );
-            vNormal_BiTanX[ i ].w = bitangent.x;
-            vTangent_BiTanY[ i ].w = bitangent.y;
-            vPosition_BiTanZ[ i ].w = bitangent.z;
+            vec3 bitangent = cross(vNormal_BiTanX[i].xyz, tangent.xyz) * (int(vertex_data[vi].tw) * i8_inverse - 1.0);
+            vNormal_BiTanX[i].w = bitangent.x;
+            vTangent_BiTanY[i].w = bitangent.y;
+            vPosition_BiTanZ[i].w = bitangent.z;
         }
 
         vTexcoord0[i] = vec2(vertex_data[vi].tu, vertex_data[vi].tv);
 
-        gl_MeshVerticesNV[ i ].gl_Position = view_projection * (model * vec4(position, 1));
+        // Let the GPU know the position of this vertex.
+        gl_MeshVerticesNV[i].gl_Position = view_projection * (model * vec4(position, 1));
 
         vec4 worldPosition = model * vec4(position, 1.0);
-        vPosition_BiTanZ[ i ].xyz = worldPosition.xyz / worldPosition.w;
+        vPosition_BiTanZ[i].xyz = worldPosition.xyz / worldPosition.w;
 
-        mesh_draw_index[ i ] = meshlets[mi].mesh_index;
-
+        mesh_draw_index[i] = meshlets[mi].mesh_index;
 
 #if DEBUG
         vColour[i] = vec4(mcolor, 1.0);
@@ -386,18 +409,18 @@ void main()
     }
 
     uint indexGroupCount = (indexCount + 3) / 4;
-
-    for (uint i = ti; i < indexGroupCount; i += 32)
-    {
+    for (uint i = ti; i < indexGroupCount; i += 32) {
+        // writePackedPrimitiveIndices4x8NV is an instruction that writes 4 indices at once. 
         writePackedPrimitiveIndices4x8NV(i * 4, meshletData[indexOffset + i]);
     }
 
-    if (ti == 0)
+    // Let the GPU know the meshlet's triangle count.
+    if (ti == 0) {
         gl_PrimitiveCountNV = uint(meshlets[mi].triangleCount);
+    }
 }
 
-#endif // MESH
-
+#endif // Mesh shader.
 
 #if defined(MESH_DEPTH_PRE)
 
