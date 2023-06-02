@@ -1,4 +1,4 @@
-
+// Contains task shader, mesh shader, and fragment shader (see all main() functions).
 #extension GL_EXT_shader_16bit_storage: require
 #extension GL_EXT_shader_8bit_storage: require
 #extension GL_NV_mesh_shader: require
@@ -36,11 +36,13 @@ struct Meshlet
     uint8_t triangleCount;
 };
 
+// Task shader.
 
 #if defined (TASK_DEPTH_PRE) || defined(TASK_GBUFFER_CULLING) || defined(TASK_TRANSPARENT_NO_CULL)
 
 #define CULL 1
 
+// Thread group size.
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = MATERIAL_SET, binding = 1) readonly buffer Meshlets
@@ -65,14 +67,16 @@ layout(set = MATERIAL_SET, binding = 7) readonly buffer VisibleMeshCount
     uint late_flag;
 };
 
-out taskNV block
-{
+// Output of task shader.
+out taskNV block {
+    // Stores the indices of meshlets that are visible (pass back-face culling, frustum
+    // culling, and occlusion culling).
     uint meshletIndices[32];
 };
 
-// NOTE(marco): as described in meshoptimizer.h
-bool coneCull(vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position)
-{
+// Does back-face culling of meshlet using its orientation cone.
+bool coneCull(vec3 center, float radius, vec3 cone_axis, float cone_cutoff, vec3 camera_position) {
+    // Is the cone pointing away from the camera?
     return dot(center - camera_position, cone_axis) >= cone_cutoff * length(center - camera_position) + radius;
 }
 
@@ -97,31 +101,52 @@ bool project_sphere(vec3 C, float r, float znear, float P00, float P11, out vec4
 	return true;
 }
 
-void main()
-{
+void main() {
+    // gl_LocalInvocationID contains the n-dimensional index of the local work
+    // invocation within the work group that the current shader is executing in.
+    //
+    // ti is thread index.
     uint ti = gl_LocalInvocationID.x;
+
+    // gl_WorkGroupID is the 3-dimensional index of the global work group that the
+    // current compute shader invocation is executing within.
+    //
+    // gi is group index.
     uint mgi = gl_WorkGroupID.x;
 
+    // Meshlet index.
     uint mi = mgi * 32 + ti;
 
+    // Determine current draw being processed. Corresponds to a draw command recorded
+    // with vkCmdDrawMeshTasksNV().
 #if defined(TASK_TRANSPARENT_NO_CULL)
     uint mesh_instance_index = draw_commands[gl_DrawIDARB + total_count].drawId;
 #else
     uint mesh_instance_index = draw_commands[gl_DrawIDARB].drawId;
 #endif
+
+    // Model matrix. (Used to transform meshlet vertices from model space to world space.)
     mat4 model = mesh_instance_draws[mesh_instance_index].model;
 
 #if CULL
+    // Do meshlet culling.
+
+    // Meshlet bounding sphere.
     vec4 world_center = model * vec4(meshlets[mi].center, 1);
-    float scale = length( model[0] );
-    float radius = meshlets[mi].radius * scale * 1.1;   // Artificially inflate bounding sphere.
-    vec3 cone_axis = mat3( model ) * vec3(int(meshlets[mi].cone_axis[0]) / 127.0, int(meshlets[mi].cone_axis[1]) / 127.0, int(meshlets[mi].cone_axis[2]) / 127.0);
+    float scale = length(model[0]);
+    // Artificially inflate bounding sphere.
+    float radius = meshlets[mi].radius * scale * 1.1;
+
+    // Meshlet orientation cone.
+    // Divide by 127.0 to convert from 1-byte integer to float (uncompress).
+    vec3 cone_axis = mat3(model) * vec3(int(meshlets[mi].cone_axis[0]) / 127.0, int(meshlets[mi].cone_axis[1]) / 127.0, int(meshlets[mi].cone_axis[2]) / 127.0);
     float cone_cutoff = int(meshlets[mi].cone_cutoff) / 127.0;
 
+    // Cull?
     bool accept = false;
     vec4 view_center = vec4(0);
-    // Backface culling and move meshlet in camera space
-    if ( freeze_occlusion_camera == 0 ) {
+    // Back-face culling of meshlet. Also, transform bounding sphere center to camera space.
+    if (freeze_occlusion_camera == 0) {
         accept = !coneCull(world_center.xyz, radius, cone_axis, cone_cutoff, eye.xyz);
         view_center = world_to_camera * world_center;
     } else {
@@ -129,17 +154,18 @@ void main()
         view_center = world_to_camera_debug * world_center;
     }
 
+    // Frustum culling of meshlet.
     bool frustum_visible = true;
-    for ( uint i = 0; i < 6; ++i ) {
-        frustum_visible = frustum_visible && (dot( frustum_planes[i], view_center) > -radius);
+    for (uint i = 0; i < 6; ++i) {
+        frustum_visible = frustum_visible && (dot(frustum_planes[i], view_center) > -radius);
     }
-
     frustum_visible = frustum_visible || (frustum_cull_meshlets == 0);
 
+    // TODO.
     bool occlusion_visible = true;
     if ( frustum_visible ) {
         vec4 aabb;
-        if ( project_sphere(view_center.xyz, radius, z_near, projection_00, projection_11, aabb ) ) {
+        if ( project_sphere( view_center.xyz, radius, z_near, projection_00, projection_11, aabb ) ) {
             // TODO: improve
             ivec2 depth_pyramid_size = textureSize(global_textures[nonuniformEXT(depth_pyramid_texture_index)], 0);
             float width = (aabb.z - aabb.x) * depth_pyramid_size.x;
@@ -183,22 +209,35 @@ void main()
 
     accept = accept && frustum_visible && occlusion_visible;
 
+    // From extension GL_KHR_shader_subgroup_ballot. A subgroup is a subset of invocations
+    // of a local workgroup that run in parallel/simultaneously on the same compute unit.
+    //
+    // Subgroups can share some data. subgroupBallot() allows each invocation to contribute
+    // the value of a single bit of the resulting uvec4. This is called a vote.
     uvec4 ballot = subgroupBallot(accept);
 
+    // Counts the number of 1-valued bits in ballot. This is supposed to give the next
+    // available index in meshletIndices[].
     uint index = subgroupBallotExclusiveBitCount(ballot);
 
-    if (accept)
+    if (accept) {
+        // Meshlet passed back-face culling, frustum culling, and occlusion culling. Record the indices of this meshlet.
+        // This is the output of the task shader. See out taskNV block.
         meshletIndices[index] = mi;
+    }
 
     uint count = subgroupBallotBitCount(ballot);
-
-    if (ti == 0)
+    if (ti == 0) {
+        // Record the number of visible meshlets.
         gl_TaskCountNV = count;
+    }
 #else
     meshletIndices[ti] = mi;
 
-    if (ti == 0)
+    if (ti == 0) {
+        // Record the number of visible meshlets: all of them.
         gl_TaskCountNV = 32;
+    }
 #endif
 }
 
@@ -247,8 +286,10 @@ layout(set = MATERIAL_SET, binding = 7) readonly buffer VisibleMeshCount
     uint late_flag;
 };
 
-in taskNV block
-{
+// Input of mesh shader coming from task shader.
+in taskNV block {
+    // Stores the indices of meshlets that are visible (pass back-face culling, frustum
+    // culling, and occlusion culling).
     uint meshletIndices[32];
 };
 

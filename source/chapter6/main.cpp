@@ -79,11 +79,10 @@ struct AsynchronousLoadTask : enki::IPinnedTask {
     bool                        execute         = true;
 }; // struct AsynchronousLoadTask
 
-//
-//
-vec4s normalize_plane( vec4s plane ) {
-    f32 len = glms_vec3_norm( { plane.x, plane.y, plane.z } );
-    return glms_vec4_scale( plane, 1.0f / len );
+// Normalizes the normal vector of a plane. (x, y, z) is normal, w is distance from origin.
+vec4s normalize_plane(vec4s plane) {
+    f32 len = glms_vec3_norm({ plane.x, plane.y, plane.z });
+    return glms_vec4_scale(plane, 1.0f / len);
 }
 
 f32 linearize_depth( f32 depth, f32 z_far, f32 z_near ) {
@@ -528,12 +527,13 @@ int main( int argc, char** argv ) {
                 projection_transpose = glms_mat4_transpose( game_camera.camera.projection );
             }
 
-            scene_data.frustum_planes[ 0 ] = normalize_plane( glms_vec4_add( projection_transpose.col[ 3 ], projection_transpose.col[ 0 ] ) ); // x + w  < 0;
-            scene_data.frustum_planes[ 1 ] = normalize_plane( glms_vec4_sub( projection_transpose.col[ 3 ], projection_transpose.col[ 0 ] ) ); // x - w  < 0;
-            scene_data.frustum_planes[ 2 ] = normalize_plane( glms_vec4_add( projection_transpose.col[ 3 ], projection_transpose.col[ 1 ] ) ); // y + w  < 0;
-            scene_data.frustum_planes[ 3 ] = normalize_plane( glms_vec4_sub( projection_transpose.col[ 3 ], projection_transpose.col[ 1 ] ) ); // y - w  < 0;
-            scene_data.frustum_planes[ 4 ] = normalize_plane( glms_vec4_add( projection_transpose.col[ 3 ], projection_transpose.col[ 2 ] ) ); // z + w  < 0;
-            scene_data.frustum_planes[ 5 ] = normalize_plane( glms_vec4_sub( projection_transpose.col[ 3 ], projection_transpose.col[ 2 ] ) ); // z - w  < 0;
+            // Used in task shader to do frustum culling of meshlets.
+            scene_data.frustum_planes[0] = normalize_plane(glms_vec4_add(projection_transpose.col[3], projection_transpose.col[0])); // x + w  < 0;
+            scene_data.frustum_planes[1] = normalize_plane(glms_vec4_sub(projection_transpose.col[3], projection_transpose.col[0])); // x - w  < 0;
+            scene_data.frustum_planes[2] = normalize_plane(glms_vec4_add(projection_transpose.col[3], projection_transpose.col[1])); // y + w  < 0;
+            scene_data.frustum_planes[3] = normalize_plane(glms_vec4_sub(projection_transpose.col[3], projection_transpose.col[1])); // y - w  < 0;
+            scene_data.frustum_planes[4] = normalize_plane(glms_vec4_add(projection_transpose.col[3], projection_transpose.col[2])); // z + w  < 0;
+            scene_data.frustum_planes[5] = normalize_plane(glms_vec4_sub(projection_transpose.col[3], projection_transpose.col[2])); // z - w  < 0;
 
             // Update scene constant buffer
             MapBufferParameters scene_cb_map = { scene->scene_cb, 0, 0 };

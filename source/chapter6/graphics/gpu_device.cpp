@@ -296,7 +296,8 @@ void GpuDevice::init( const GpuDeviceCreation& creation ) {
                 continue;
             }
 
-            if ( !strcmp( extensions[ i ].extensionName, VK_NV_MESH_SHADER_EXTENSION_NAME ) ) {
+            if (!strcmp(extensions[i].extensionName, VK_NV_MESH_SHADER_EXTENSION_NAME)) {
+                // Mesh shaders Vulkan extension.
                 mesh_shaders_extension_present = true;
                 continue;
             }
@@ -484,10 +485,15 @@ void GpuDevice::init( const GpuDeviceCreation& creation ) {
         cmd_pipeline_barrier2 = ( PFN_vkCmdPipelineBarrier2KHR )vkGetDeviceProcAddr( vulkan_device, "vkCmdPipelineBarrier2KHR" );
     }
 
-    if ( mesh_shaders_extension_present ) {
-        cmd_draw_mesh_tasks = (PFN_vkCmdDrawMeshTasksNV)vkGetDeviceProcAddr( vulkan_device, "vkCmdDrawMeshTasksNV" );
-        cmd_draw_mesh_tasks_indirect = (PFN_vkCmdDrawMeshTasksIndirectNV)vkGetDeviceProcAddr( vulkan_device, "vkCmdDrawMeshTasksIndirectNV" );
-        cmd_draw_mesh_tasks_indirect_count = ( PFN_vkCmdDrawMeshTasksIndirectCountNV )vkGetDeviceProcAddr( vulkan_device, "vkCmdDrawMeshTasksIndirectCountNV" );
+    if (mesh_shaders_extension_present) {
+        // VK_NV_MESH_SHADER_EXTENSION_NAME.
+
+        // Function pointer to vkCmdDrawMeshTasksNV(). Used to record a task shader drawing command.
+        cmd_draw_mesh_tasks = (PFN_vkCmdDrawMeshTasksNV) vkGetDeviceProcAddr(vulkan_device, "vkCmdDrawMeshTasksNV");
+        // Function pointer to vkCmdDrawMeshTasksIndirectNV().
+        cmd_draw_mesh_tasks_indirect = (PFN_vkCmdDrawMeshTasksIndirectNV) vkGetDeviceProcAddr(vulkan_device, "vkCmdDrawMeshTasksIndirectNV");
+        // Function pointer to vkCmdDrawMeshTasksIndirectCountNV().
+        cmd_draw_mesh_tasks_indirect_count = (PFN_vkCmdDrawMeshTasksIndirectCountNV) vkGetDeviceProcAddr(vulkan_device, "vkCmdDrawMeshTasksIndirectCountNV");
     }
 
     // Get main queue

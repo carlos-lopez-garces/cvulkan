@@ -499,9 +499,9 @@ void CommandBuffer::draw_indexed_indirect( BufferHandle buffer_handle, u32 draw_
     vkCmdDrawIndexedIndirect( vk_command_buffer, vk_buffer, vk_offset, draw_count, stride );
 }
 
-void CommandBuffer::draw_mesh_task( u32 task_count, u32 first_task ) {
-
-    device->cmd_draw_mesh_tasks( vk_command_buffer, task_count, first_task );
+void CommandBuffer::draw_mesh_task(u32 task_count, u32 first_task) {
+    // Record a task shader drawing command through a vkCmdDrawMeshTasksNV() function pointer.
+    device->cmd_draw_mesh_tasks(vk_command_buffer, task_count, first_task);
 }
 
 void CommandBuffer::draw_mesh_task_indirect( BufferHandle argument_buffer, u32 argument_offset, BufferHandle count_buffer, u32 count_offset, u32 max_draws, u32 stride ) {

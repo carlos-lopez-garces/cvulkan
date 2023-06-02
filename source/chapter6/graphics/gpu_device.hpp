@@ -319,7 +319,7 @@ struct GpuDevice : public Service {
     PFN_vkQueueSubmit2KHR           queue_submit2;
     PFN_vkCmdPipelineBarrier2KHR    cmd_pipeline_barrier2;
     
-    // Mesh shaders functions
+    // Mesh shaders functions. Function pointers retrieved in GpuDevice::init().
     PFN_vkCmdDrawMeshTasksNV        cmd_draw_mesh_tasks;
     PFN_vkCmdDrawMeshTasksIndirectCountNV cmd_draw_mesh_tasks_indirect_count;
     PFN_vkCmdDrawMeshTasksIndirectNV cmd_draw_mesh_tasks_indirect;
