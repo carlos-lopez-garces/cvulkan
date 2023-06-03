@@ -484,8 +484,7 @@ namespace raptor {
         u32                     meshlet_technique_index;
     }; // struct DepthPrePass
 
-    //
-    //
+    // The Depth Pyramid Pass builds a depth pyramid (a mipmap for the depth buffer).
     struct DepthPyramidPass : public FrameGraphRenderPass {
         void                    render( CommandBuffer* gpu_commands, RenderScene* render_scene ) override;
         void                    on_resize( GpuDevice& gpu, FrameGraph* frame_graph, u32 new_width, u32 new_height ) override;
@@ -498,6 +497,8 @@ namespace raptor {
 
         Renderer*               renderer;
 
+        // Pipeline for generating and updating a depth pyramid. Used in depth pyramid
+        // frame graph render pass.
         PipelineHandle          depth_pyramid_pipeline;
         TextureHandle           depth_pyramid;
         SamplerHandle           depth_pyramid_sampler;
@@ -506,6 +507,7 @@ namespace raptor {
 
         u32                     depth_pyramid_levels = 0;
 
+        // Determine in render() whether to update the depth pyramid in post_render().
         bool                    update_depth_pyramid;
     }; // struct DepthPrePass
 

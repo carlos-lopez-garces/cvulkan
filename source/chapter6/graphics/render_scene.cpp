@@ -199,48 +199,63 @@ void DepthPrePass::free_gpu_resources() {
     mesh_instance_draws.shutdown();
 }
 
-//
-// DepthPrePass ///////////////////////////////////////////////////////
-void DepthPyramidPass::render( CommandBuffer* gpu_commands, RenderScene* render_scene ) {
-    if ( !enabled )
-        return;
+// Depth Pyramid Pass.
 
-    update_depth_pyramid = ( render_scene->scene_data.freeze_occlusion_camera == 0 );
+void DepthPyramidPass::render(CommandBuffer *gpu_commands, RenderScene *render_scene) {
+    if (!enabled) {
+        return;
+    }
+
+    // Determine whether to update the depth pyramid in post_render().
+    update_depth_pyramid = (render_scene->scene_data.freeze_occlusion_camera == 0);
 }
 
-void DepthPyramidPass::post_render( u32 current_frame_index, CommandBuffer* gpu_commands, FrameGraph* frame_graph ) {
-    if ( !enabled )
+// Using the depth pyramid pipeline, record commands that dispatch the depth_pyramid.glsl
+// compute shader for each mipmap level of the pyramid, in descending order of resolution.
+void DepthPyramidPass::post_render(u32 current_frame_index, CommandBuffer *gpu_commands, FrameGraph *frame_graph) {
+    if (!enabled) {
         return;
+    }
 
     GpuDevice* gpu = renderer->gpu;
 
-    Texture* depth_pyramid_texture = gpu->access_texture( depth_pyramid );
+    // TODO: put inside the if block.
+    Texture *depth_pyramid_texture = gpu->access_texture(depth_pyramid);
 
-    if ( update_depth_pyramid ) {
-        gpu_commands->bind_pipeline( depth_pyramid_pipeline );
+    if (update_depth_pyramid) {
+        // Bind the depth pyramid pipeline.
+        gpu_commands->bind_pipeline(depth_pyramid_pipeline);
 
         u32 width = depth_pyramid_texture->width;
         u32 height = depth_pyramid_texture->height;
 
-        FrameGraphResource* depth_resource = ( FrameGraphResource* )frame_graph->get_resource( "depth" );
+        FrameGraphResource *depth_resource = (FrameGraphResource *) frame_graph->get_resource("depth");
         TextureHandle depth_handle = depth_resource->resource_info.texture.handle;
-        Texture* depth_texture = gpu->access_texture( depth_handle );
+        Texture *depth_texture = gpu->access_texture(depth_handle);
 
-        util_add_image_barrier( gpu, gpu_commands->vk_command_buffer, depth_texture, RESOURCE_STATE_SHADER_RESOURCE, 0, 1, true );
+        // Bind depth pyramid texture as shader resource.
+        util_add_image_barrier(gpu, gpu_commands->vk_command_buffer, depth_texture, RESOURCE_STATE_SHADER_RESOURCE, 0, 1, true);
 
-        for ( u32 mip_index = 0; mip_index < depth_pyramid_texture->mip_level_count; ++mip_index ) {
-            util_add_image_barrier( gpu, gpu_commands->vk_command_buffer, depth_pyramid_texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_UNORDERED_ACCESS, mip_index, 1, false );
+        // The depth_texture has mipmaps (multiple textures). Generate/update mipmap levels
+        // in descending order of resolution.
+        for (u32 mip_index = 0; mip_index < depth_pyramid_texture->mip_level_count; ++mip_index) {
+            // Transition this level's texture to unordered access state so that the
+            // compute shader can write to it.
+            util_add_image_barrier(gpu, gpu_commands->vk_command_buffer, depth_pyramid_texture->vk_image, RESOURCE_STATE_UNDEFINED, RESOURCE_STATE_UNORDERED_ACCESS, mip_index, 1, false);
 
-            gpu_commands->bind_descriptor_set( &depth_hierarchy_descriptor_set[ mip_index ], 1, nullptr, 0 );
+            gpu_commands->bind_descriptor_set(&depth_hierarchy_descriptor_set[mip_index], 1, nullptr, 0);
 
-            // NOTE(marco): local workgroup is 8 x 8
-            u32 group_x = ( width + 7 ) / 8;
-            u32 group_y = ( height + 7 ) / 8;
+            // Compute group size for this level. Local workgroup is 8x8.
+            u32 group_x = (width + 7) / 8;
+            u32 group_y = (height + 7) / 8;
 
-            gpu_commands->dispatch( group_x, group_y, 1 );
+            gpu_commands->dispatch(group_x, group_y, 1);
 
-            util_add_image_barrier( gpu, gpu_commands->vk_command_buffer, depth_pyramid_texture->vk_image, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_SHADER_RESOURCE, mip_index, 1, false );
+            // Transition this level's texture to shader resource state so that the
+            // compute shader can read from it to write the next lower level.
+            util_add_image_barrier(gpu, gpu_commands->vk_command_buffer, depth_pyramid_texture->vk_image, RESOURCE_STATE_UNORDERED_ACCESS, RESOURCE_STATE_SHADER_RESOURCE, mip_index, 1, false);
 
+            // Each lower level is half the size.
             width /= 2;
             height /= 2;
         }
