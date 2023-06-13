@@ -2028,14 +2028,22 @@ void RenderScene::update_joints() {
     }
 }
 
+// SortedLight is a minimal representation of a Light with only enough
+// information to sort lights by depth in camera space. SortedLight.light_index
+// refers to the represented light in lights[].
 struct SortedLight {
+    // Index of this light in the original lights array.
+    u32 light_index;
+    // Depth of light position in camera space, mapped to the interval [0,1].
+    f32 projected_z;
+    // projected_z minus light's radius.
+    f32 projected_z_min;
+    // projected_z plus light's radius.
+    f32 projected_z_max;
+};
 
-    u32             light_index;
-    f32             projected_z;
-    f32             projected_z_min;
-    f32             projected_z_max;
-}; // struct SortedLight
-
+// Comparison callback for sorting an array of SortedLights in ascending
+// order of depth in camera space (SortedLight.projected_z).
 static int sorting_light_fn( const void* a, const void* b ) {
     const SortedLight* la = (const SortedLight*)a;
     const SortedLight* lb = (const SortedLight*)b;
@@ -2082,41 +2090,49 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
 
     sizet current_marker = context.scratch_allocator->get_marker();
 
+    // SortedLight is a minimal representation of a Light with only enough
+    // information to sort lights by depth. SortedLight.light_index refers to
+    // the represented light in lights[].
     Array<SortedLight> sorted_lights;
-    sorted_lights.init( context.scratch_allocator, k_num_lights, k_num_lights );
-
-    // Sort lights based on Z
+    sorted_lights.init(context.scratch_allocator, k_num_lights, k_num_lights);
     mat4s& world_to_camera = scene_data.world_to_camera;
     float z_far = scene_data.z_far;
-    for ( u32 i = 0; i < k_num_lights; ++i ) {
-        Light& light = lights[ i ];
+    for (u32 i = 0; i < k_num_lights; ++i) {
+        Light& light = lights[i];
 
         vec4s p{ light.world_position.x, light.world_position.y, light.world_position.z, 1.0f };
 
-        vec4s projected_p = glms_mat4_mulv( world_to_camera, p );
-        vec4s projected_p_min = glms_vec4_add( projected_p, { 0,0,-light.radius, 0 } );
-        vec4s projected_p_max = glms_vec4_add( projected_p, { 0,0,light.radius, 0 } );
+        vec4s projected_p = glms_mat4_mulv(world_to_camera, p);
+        vec4s projected_p_min = glms_vec4_add(projected_p, { 0, 0, -light.radius, 0 });
+        vec4s projected_p_max = glms_vec4_add(projected_p, { 0, 0, light.radius, 0 });
 
         // NOTE(marco): linearize depth
-        SortedLight& sorted_light = sorted_lights[ i ];
+        SortedLight &sorted_light = sorted_lights[i];
         sorted_light.light_index = i;
+        // SortedLight.projected_z is what's used to sort in ascending order of depth.
+        // projected_z is projected_p.z mapped to the interval [0,1].
         // Remove negative numbers as they cause false negatives for bin 0.
-        sorted_light.projected_z = ( ( projected_p.z - scene_data.z_near ) / ( z_far - scene_data.z_near ) );
-        sorted_light.projected_z_min = ( ( projected_p_min.z - scene_data.z_near ) / ( z_far - scene_data.z_near ) );
-        sorted_light.projected_z_max = ( ( projected_p_max.z - scene_data.z_near ) / ( z_far - scene_data.z_near ) );
+        sorted_light.projected_z = ((projected_p.z - scene_data.z_near) / (z_far - scene_data.z_near));
+        sorted_light.projected_z_min = ((projected_p_min.z - scene_data.z_near) / (z_far - scene_data.z_near));
+        sorted_light.projected_z_max = ((projected_p_max.z - scene_data.z_near) / (z_far - scene_data.z_near));
 
         //rprint( "Light Z %f, Zmin %f, Zmax %f\n", sorted_light.projected_z, sorted_light.projected_z_min, sorted_light.projected_z_max );
     }
+    // Sort sorted_lights in ascending order of depth (SortedLight.projected_z) using quicksort
+    // and sorting_light_fn().
+    qsort(sorted_lights.data, k_num_lights, sizeof(SortedLight), sorting_light_fn);
 
-    qsort( sorted_lights.data, k_num_lights, sizeof( SortedLight ), sorting_light_fn );
-
-    // Upload light list
+    // Upload light list to GPU.
     cb_map.buffer = lights_list_sb;
-    GpuLight* gpu_lights_data = ( GpuLight* )gpu.map_buffer( cb_map );
-    if ( gpu_lights_data ) {
-        for ( u32 i = 0; i < k_num_lights; ++i ) {
-            Light& light = lights[ i ];
-            GpuLight& gpu_light = gpu_lights_data[ i ];
+    // cb_map is a simple struct with a BufferHandle, an offset, and a size.
+    // map_buffer() allocates memory for the resource pointed to by cp_map.buffer
+    // using the Vulkan Memory Allocator (VMA). The returned pointer points to
+    // shared memory between the CPU and the GPU.
+    GpuLight *gpu_lights_data = (GpuLight *) gpu.map_buffer(cb_map);
+    if (gpu_lights_data) {
+        for (u32 i = 0; i < k_num_lights; ++i) {
+            Light &light = lights[i];
+            GpuLight &gpu_light = gpu_lights_data[i];
 
             gpu_light.world_position = light.world_position;
             gpu_light.attenuation = light.radius;
@@ -2124,133 +2140,151 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
             gpu_light.intensity = light.intensity;
         }
 
-        gpu.unmap_buffer( cb_map );
+        gpu.unmap_buffer(cb_map);
     }
 
-    // Calculate lights LUT
+    // Populate lights LUT (lookup table).
     // NOTE(marco): it might be better to use logarithmic slices to have better resolution
     // closer to the camera. We could also use a different far plane and discard any lights
     // that are too far
     f32 bin_size = 1.0f / k_light_z_bins;
-
-    for ( u32 bin = 0; bin < k_light_z_bins; ++bin ) {
+    for (u32 bin = 0; bin < k_light_z_bins; ++bin) {
+        // min_light_id will be the index of the sorted light whose depth is the minimum of
+        // those assigned to this bin.
         u32 min_light_id = k_num_lights + 1;
         u32 max_light_id = 0;
 
+        // Depth (z) boundaries of this bin. Somewhere between 0 and 1. Lights whose normalized
+        // depth lies within these boundaries are placed in this bin.
         f32 bin_min = bin_size * bin;
         f32 bin_max = bin_min + bin_size;
 
-        for ( u32 i = 0; i < k_num_lights; ++i ) {
-            const SortedLight& light = sorted_lights[ i ];
+        for (u32 i = 0; i < k_num_lights; ++i) {
+            const SortedLight &light = sorted_lights[i];
 
-            if ( ( light.projected_z >= bin_min && light.projected_z <= bin_max ) ||
-                 ( light.projected_z_min >= bin_min && light.projected_z_min <= bin_max ) ||
-                 ( light.projected_z_max >= bin_min && light.projected_z_max <= bin_max ) ) {
-                if ( i < min_light_id ) {
+            if ((light.projected_z >= bin_min && light.projected_z <= bin_max)
+                || (light.projected_z_min >= bin_min && light.projected_z_min <= bin_max)
+                || (light.projected_z_max >= bin_min && light.projected_z_max <= bin_max)) {
+                // This light belongs to this bin.
+
+                if (i < min_light_id) {
+                    // This light becomes the closest one of the bin.
                     min_light_id = i;
                 }
 
-                if ( i > max_light_id ) {
+                if (i > max_light_id) {
+                    // This light becomes the farthest one of the bin.
                     max_light_id = i;
                 }
             }
         }
 
-        lights_lut[ bin ] = min_light_id | ( max_light_id << 16 );
+        // Bin representation is very compact: a u32 element of a u32[]. The upper 16 bits
+        // encode the index of the most distant light of the bin and the lower 16 bits that
+        // of the closest light. 
+        lights_lut[bin] = min_light_id | (max_light_id << 16);
     }
 
-    // Upload light indices
-    cb_map.buffer = lights_indices_sb[ gpu.current_frame ];
-
-    u32* gpu_light_indices = ( u32* )gpu.map_buffer( cb_map );
-    if ( gpu_light_indices ) {
+    // Upload light indices to GPU. These indices are of the original lights[] array, not
+    // the sorted one. This array is where all of each light's data is.
+    cb_map.buffer = lights_indices_sb[gpu.current_frame];
+    // cb_map is a simple struct with a BufferHandle, an offset, and a size.
+    // map_buffer() allocates memory for the resource pointed to by cp_map.buffer
+    // using the Vulkan Memory Allocator (VMA). The returned pointer points to
+    // shared memory between the CPU and the GPU.
+    u32 *gpu_light_indices = (u32 *) gpu.map_buffer(cb_map);
+    if (gpu_light_indices) {
         // TODO: improve
         //memcpy( gpu_light_indices, lights_lut.data, lights_lut.size * sizeof( u32 ) );
-        for ( u32 i = 0; i < k_num_lights; ++i ) {
-            gpu_light_indices[ i ] = sorted_lights[ i ].light_index;
+        for (u32 i = 0; i < k_num_lights; ++i) {
+            gpu_light_indices[i] = sorted_lights[i].light_index;
         }
 
-        gpu.unmap_buffer( cb_map );
+        gpu.unmap_buffer(cb_map);
     }
 
-    // Upload lights LUT
-    cb_map.buffer = lights_lut_sb[ gpu.current_frame ];
-    u32* gpu_lut_data = ( u32* )gpu.map_buffer( cb_map );
-    if ( gpu_lut_data ) {
-        memcpy( gpu_lut_data, lights_lut.data, lights_lut.size * sizeof( u32 ) );
+    // Upload lights LUT (lookup table) to GPU.
+    cb_map.buffer = lights_lut_sb[gpu.current_frame];
+    u32 *gpu_lut_data = (u32 *)gpu.map_buffer(cb_map);
+    if (gpu_lut_data) {
+        memcpy(gpu_lut_data, lights_lut.data, lights_lut.size * sizeof(u32));
 
-        gpu.unmap_buffer( cb_map );
+        gpu.unmap_buffer(cb_map);
     }
 
+    // Divide the frame into 8x8 pixel tiles.
     const u32 tile_x_count = scene_data.resolution_x / k_tile_size;
     const u32 tile_y_count = scene_data.resolution_y / k_tile_size;
+    // TODO: ?
     const u32 tiles_entry_count = tile_x_count * tile_y_count * k_num_words;
-    const u32 buffer_size = tiles_entry_count * sizeof( u32 );
+    const u32 buffer_size = tiles_entry_count * sizeof(u32);
 
-    // Assign light
     Array<u32> light_tiles_bits;
-    light_tiles_bits.init( context.scratch_allocator, tiles_entry_count, tiles_entry_count );
-    memset( light_tiles_bits.data, 0, buffer_size );
+    light_tiles_bits.init(context.scratch_allocator, tiles_entry_count, tiles_entry_count);
+    memset(light_tiles_bits.data, 0, buffer_size);
 
     float near_z = scene_data.z_near;
+    // 1 / 8.
     float tile_size_inv = 1.0f / k_tile_size;
 
     u32 tile_stride = tile_x_count * k_num_words;
 
     GameCamera& game_camera = context.game_camera;
 
-    for ( u32 i = 0; i < k_num_lights; ++i ) {
-        const u32 light_index = sorted_lights[ i ].light_index;
-        Light& light = lights[ light_index ];
+    for (u32 i = 0; i < k_num_lights; ++i) {
+        const u32 light_index = sorted_lights[i].light_index;
+        Light &light = lights[light_index];
 
         vec4s pos{ light.world_position.x, light.world_position.y, light.world_position.z, 1.0f };
         float radius = light.radius;
 
-        vec4s view_space_pos = glms_mat4_mulv( game_camera.camera.view, pos );
-        bool camera_visible = -view_space_pos.z - radius < game_camera.camera.near_plane;
+        // Transform light's position from world space to view space.
+        vec4s view_space_pos = glms_mat4_mulv(game_camera.camera.view, pos);
 
-        if ( !camera_visible && context.skip_invisible_lights ) {
+        bool camera_visible = -view_space_pos.z - radius < game_camera.camera.near_plane;
+        if (!camera_visible && context.skip_invisible_lights) {
+            // The radius of a light determines its reach. This light doesn't reach
+            // any object that's in front of the camera.
             continue;
         }
 
         //rprint( "Camera vis %u view z %f\n", camera_visible ? 1 : 0, view_space_pos.z );
 
-        // X is positive, then it returns the same values as the longer method.
+        // Compute axis-aligned bounding box of light in clip space (2D). 4 corners of the
+        // rectangle that bounds a sphere around the light.
+        //
+        // This might be explained in one of the references of the paper "2D Polyhedral Bounds of a Clipped,
+        // Perspective-Projected 3D Sphere", https://jcgt.org/published/0002/02/05/paper.pdf.
+
         vec2s cx{ view_space_pos.x, view_space_pos.z };
-        const f32 tx_squared = glms_vec2_dot( cx, cx ) - ( radius * radius );
-        const bool tx_camera_inside = tx_squared <= 0;//
-        vec2s vx{ sqrtf( tx_squared ), radius };
+        const f32 tx_squared = glms_vec2_dot(cx, cx) - (radius * radius);
+        // The camera's position point is within the radius of the light.
+        // TODO: tx_camera_inside is not used.
+        const bool tx_camera_inside = tx_squared <= 0;
+        vec2s vx{ sqrtf(tx_squared), radius };
         mat2s xtransf_min{ vx.x, vx.y, -vx.y, vx.x };
-        vec2s minx = glms_mat2_mulv( xtransf_min, cx );
+        vec2s minx = glms_mat2_mulv(xtransf_min, cx);
         mat2s xtransf_max{ vx.x, -vx.y, vx.y, vx.x };
-        vec2s maxx = glms_mat2_mulv( xtransf_max, cx );
+        vec2s maxx = glms_mat2_mulv(xtransf_max, cx);
 
         vec2s cy{ -view_space_pos.y, view_space_pos.z };
-        const f32 ty_squared = glms_vec2_dot( cy, cy ) - ( radius * radius );
-        const bool ty_camera_inside = ty_squared <= 0;//
-        vec2s vy{ sqrtf( ty_squared ), radius };
+        const f32 ty_squared = glms_vec2_dot(cy, cy) - (radius * radius);
+        // The camera's position point is within the radius of the light.
+        // TODO: ty_camera_inside is not used.
+        const bool ty_camera_inside = ty_squared <= 0;
+        vec2s vy{ sqrtf(ty_squared), radius };
         mat2s ytransf_min{ vy.x, vy.y, -vy.y, vy.x };
-        vec2s miny = glms_mat2_mulv( ytransf_min, cy );
+        vec2s miny = glms_mat2_mulv(ytransf_min, cy);
         mat2s ytransf_max{ vy.x, -vy.y, vy.y, vy.x };
-        vec2s maxy = glms_mat2_mulv( ytransf_max, cy );
+        vec2s maxy = glms_mat2_mulv(ytransf_max, cy);
 
-        vec4s aabb{ minx.x / minx.y * game_camera.camera.projection.m00, miny.x / miny.y * game_camera.camera.projection.m11,
-                    maxx.x / maxx.y * game_camera.camera.projection.m00, maxy.x / maxy.y * game_camera.camera.projection.m11 };
+        vec4s aabb {
+            minx.x / minx.y * game_camera.camera.projection.m00, miny.x / miny.y * game_camera.camera.projection.m11,
+            maxx.x / maxx.y * game_camera.camera.projection.m00, maxy.x / maxy.y * game_camera.camera.projection.m11
+        };
 
-
-        //if ( tx_camera_inside ) {
-        //    //aabb = { -1,-1,1,1 };
-        //    aabb.x = -1;
-        //    aabb.z = 1;
-        //}
-
-        //if ( ty_camera_inside ) {
-        //    //aabb = { -1,-1,1,1 };
-        //    aabb.y = -1;
-        //    aabb.w = 1;
-        //}
-        // TODO:
-        if ( context.use_mcguire_method ) {
+        if (context.use_mcguire_method) {
+            // See "2D Polyhedral Bounds of a Clipped, Perspective-Projected 3D Sphere", https://jcgt.org/published/0002/02/05/paper.pdf.
             vec3s left, right, top, bottom;
             get_bounds_for_axis( vec3s{ 1, 0, 0 }, { view_space_pos.x, view_space_pos.y, view_space_pos.z }, radius, game_camera.camera.near_plane, left, right );
             get_bounds_for_axis( vec3s{ 0, 1, 0 }, { view_space_pos.x, view_space_pos.y, view_space_pos.z }, radius, game_camera.camera.near_plane, top, bottom );
@@ -2300,10 +2334,13 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
             aabb.y = -1 * aabb_max.y;
         }
 
-        const f32 position_len = glms_vec3_norm( { view_space_pos.x, view_space_pos.y, view_space_pos.z } );
-        const bool camera_inside = ( position_len - radius ) < game_camera.camera.near_plane;
+        const f32 position_len = glms_vec3_norm({ view_space_pos.x, view_space_pos.y, view_space_pos.z });
+        // Is the camera position's point within the radius of the light?
+        const bool camera_inside = (position_len - radius) < game_camera.camera.near_plane;
 
-        if ( camera_inside && context.enable_camera_inside ) {
+        if (camera_inside && context.enable_camera_inside) {
+            // When the camera is within the light's radius, the AABB is the entirety
+            // of clip space, [-1,1]x[-1,1].
             aabb = { -1,-1, 1, 1 };
         }
 
@@ -2311,6 +2348,7 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
             aabb = { -1,-1, 1, 1 };
         }
 
+        // Project AABB onto screen space (i.e. map it to the render target's resolution).
         // NOTE(marco): xy = top-left, zw = bottom-right
         vec4s aabb_screen{ ( aabb.x * 0.5f + 0.5f ) * ( gpu.swapchain_width - 1 ),
                            ( aabb.y * 0.5f + 0.5f ) * ( gpu.swapchain_height - 1 ),
@@ -2320,7 +2358,8 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
         f32 width = aabb_screen.z - aabb_screen.x;
         f32 height = aabb_screen.w - aabb_screen.y;
 
-        if ( width < 0.0001f || height < 0.0001f ) {
+        if (width < 0.0001f || height < 0.0001f) {
+            // The size of the light's AABB in screen space is negligible.
             continue;
         }
 
@@ -2330,47 +2369,61 @@ void RenderScene::upload_gpu_data( UploadGpuDataContext& context ) {
         float max_x = min_x + width;
         float max_y = min_y + height;
 
-        if ( min_x > gpu.swapchain_width || min_y > gpu.swapchain_height ) {
+        if (min_x > gpu.swapchain_width || min_y > gpu.swapchain_height) {
+            // The AABB is not contained by the screen, so the light isn't visible.
+            // The AABB "starts beyond" the screen.
             continue;
         }
 
-        if ( max_x < 0.0f || max_y < 0.0f ) {
+        if (max_x < 0.0f || max_y < 0.0f) {
+            // The AABB is not contained by the screen, so the light isn't visible.
+            // The AABB "ends before" the screen.
             continue;
         }
 
-        min_x = max( min_x, 0.0f );
-        min_y = max( min_y, 0.0f );
+        // Clip the AABB to the extent of the screen.
+        min_x = max(min_x, 0.0f);
+        min_y = max(min_y, 0.0f);
+        max_x = min(max_x, (float) gpu.swapchain_width);
+        max_y = min(max_y, (float) gpu.swapchain_height);
 
-        max_x = min( max_x, ( float )gpu.swapchain_width );
-        max_y = min( max_y, ( float )gpu.swapchain_height );
-
-        u32 first_tile_x = ( u32 )( min_x * tile_size_inv );
-        u32 last_tile_x = min( tile_x_count - 1, ( u32 )( max_x * tile_size_inv ) );
-
-        u32 first_tile_y = ( u32 )( min_y * tile_size_inv );
-        u32 last_tile_y = min( tile_y_count - 1, ( u32 )( max_y * tile_size_inv ) );
-
-        for ( u32 y = first_tile_y; y <= last_tile_y; ++y ) {
-            for ( u32 x = first_tile_x; x <= last_tile_x; ++x ) {
+        // min_x is in [0, render target width].
+        // min_x / 8 gives the x-coordinate of the tiles where the 2 min_x corners of the screen-space AABB are.
+        u32 first_tile_x = (u32) (min_x * tile_size_inv);
+        // tile_x_count - 1 is the x-coordinate of the last tile. max_x / 9 gives the x-coordinate of the tiles
+        // where the 2 max_x corners of the screen-space AABB are.
+        u32 last_tile_x = min(tile_x_count - 1, (u32) (max_x * tile_size_inv));
+        u32 first_tile_y = (u32) (min_y * tile_size_inv);
+        u32 last_tile_y = min(tile_y_count - 1, (u32) (max_y * tile_size_inv));
+        // This light is visible through all the tiles with x-coordinate in [first_tile_x, last_tile_x] and
+        // y-coordinate in [first_tile_y, last_tile_y].
+        for (u32 y = first_tile_y; y <= last_tile_y; ++y) {
+            for (u32 x = first_tile_x; x <= last_tile_x; ++x) {
+                // tile_stride is tile_x_count * k_num_words, which is the number of u32's needed to get
+                // 1 bit per light in the scene per tile. tile_x_count is the number of tiles across and
+                // k_num_words is the number of u32's needed per tile to get 1 bit per light in the scene.
                 u32 array_index = y * tile_stride + x;
 
                 u32 word_index = i / 32;
                 u32 bit_index = i % 32;
 
-                light_tiles_bits[ array_index + word_index ] |= ( 1 << bit_index );
+                // Set the bit corresponding to this light on this tile. It's visible.
+                light_tiles_bits[array_index + word_index] |= (1 << bit_index);
             }
         }
     }
 
-    MapBufferParameters light_tiles_cb_map = { lights_tiles_sb[ gpu.current_frame ], 0, 0 };
-    u32* light_tiles_data = ( u32* )gpu.map_buffer( light_tiles_cb_map );
-    if ( light_tiles_data ) {
-        memcpy( light_tiles_data, light_tiles_bits.data, light_tiles_bits.size * sizeof( u32 ) );
+    // Upload light_tiles_bits to the GPU, the array of bits that marks the lights that
+    // are visible through each tile.
+    MapBufferParameters light_tiles_cb_map = { lights_tiles_sb[gpu.current_frame], 0, 0 };
+    u32 *light_tiles_data = (u32 *) gpu.map_buffer(light_tiles_cb_map);
+    if (light_tiles_data) {
+        memcpy(light_tiles_data, light_tiles_bits.data, light_tiles_bits.size * sizeof(u32));
 
-        gpu.unmap_buffer( light_tiles_cb_map );
+        gpu.unmap_buffer(light_tiles_cb_map);
     }
 
-    context.scratch_allocator->free_marker( current_marker );
+    context.scratch_allocator->free_marker(current_marker);
 }
 
 void RenderScene::draw_mesh_instance( CommandBuffer* gpu_commands, MeshInstance& mesh_instance ) {
