@@ -313,9 +313,12 @@ struct GpuDevice : public Service {
 
     VmaAllocator                    vma_allocator;
 
-    // Extension functions
+    // Extension functions:
+
+    // VK_KHR_dynamic_rendering extension. Use vkCmdBeginRenderingKHR instea of vkCmdBeginRenderPass.
     PFN_vkCmdBeginRenderingKHR      cmd_begin_rendering;
     PFN_vkCmdEndRenderingKHR        cmd_end_rendering;
+    
     PFN_vkQueueSubmit2KHR           queue_submit2;
     PFN_vkCmdPipelineBarrier2KHR    cmd_pipeline_barrier2;
     

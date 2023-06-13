@@ -49,11 +49,17 @@ layout (location = 3) in vec3 vBiTangent;
 layout (location = 4) in vec3 vPosition;
 layout (location = 5) in flat uint mesh_draw_index;
 
+// G-buffer render targets.
+//
+// If these are color attachments created with vkCmdBeginRenderingKHR (VK_KHR_dynamic_rendering
+// extension), then the order in which they are passed to vkCmdBeginRenderingKHR corresponds to
+// layout locations here. If that extension isn't used, then ... ?
 layout (location = 0) out vec4 color_out;
 layout (location = 1) out vec2 normal_out;
 layout (location = 2) out vec4 occlusion_roughness_metalness_out;
 layout (location = 3) out vec4 emissive_out;
 
+// Populates the render targets of the G-buffer.
 void main() {
     MeshDraw mesh_draw = mesh_draws[mesh_draw_index];
     
@@ -78,6 +84,8 @@ void main() {
     // Pixel normals
     normal = apply_pixel_normal( mesh_draw.textures.z, vTexcoord0.xy, normal, tangent, bitangent );
 
+    // The normal is encoded using only 2 channels to reduce memory usage. The third
+    // component can be recovered in the lighting pass.
     normal_out.rg = octahedral_encode(normal);
 
     // PBR Parameters

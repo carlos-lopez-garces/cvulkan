@@ -157,13 +157,20 @@ void CommandBuffer::bind_pass( RenderPassHandle handle_, FramebufferHandle frame
         Framebuffer* framebuffer = device->access_framebuffer( framebuffer_ );
 
         if ( render_pass != current_render_pass ) {
-            if ( device->dynamic_rendering_extension_present ) {
+            // Call cmd_begin_rendering (a function pointer to vkCmdBeginRenderingKHR)
+            // when extension VK_KHR_dynamic_rendering is available, instead of
+            // vkCmdBeginRenderPass.
+            if (device->dynamic_rendering_extension_present) {
                 Array<VkRenderingAttachmentInfoKHR> color_attachments_info;
                 color_attachments_info.init( device->allocator, framebuffer->num_color_attachments, framebuffer->num_color_attachments );
                 memset( color_attachments_info.data, 0, sizeof( VkRenderingAttachmentInfoKHR ) * framebuffer->num_color_attachments );
 
-                for ( u32 a = 0; a < framebuffer->num_color_attachments; ++a ) {
-                    Texture* texture = device->access_texture( framebuffer->color_attachments[a] );
+                // Populate array of VkRenderingAttachmentInfoKHR (creation details) for color attachments.
+                //
+                // The render targets of the G-buffer are created this way. The order in which they are listed
+                // here should coincide with layout locations in the (gbuffer.glsl) shader.
+                for (u32 a = 0; a < framebuffer->num_color_attachments; ++a) {
+                    Texture *texture = device->access_texture(framebuffer->color_attachments[a]);
 
                     texture->state = RESOURCE_STATE_RENDER_TARGET;
 
@@ -190,15 +197,14 @@ void CommandBuffer::bind_pass( RenderPassHandle handle_, FramebufferHandle frame
                     color_attachment_info.clearValue = render_pass->output.color_operations[ a ] == RenderPassOperation::Enum::Clear ? clear_values[ a ] : VkClearValue{ };
                 }
 
+                // Creation details for depth attachment.
                 VkRenderingAttachmentInfoKHR depth_attachment_info{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-
                 bool has_depth_attachment = framebuffer->depth_stencil_attachment.index != k_invalid_index;
-
-                if ( has_depth_attachment ) {
-                    Texture* texture = device->access_texture( framebuffer->depth_stencil_attachment );
+                if (has_depth_attachment) {
+                    Texture *texture = device->access_texture(framebuffer->depth_stencil_attachment);
 
                     VkAttachmentLoadOp depth_op;
-                    switch ( render_pass->output.depth_operation ) {
+                    switch (render_pass->output.depth_operation) {
                         case RenderPassOperation::Load:
                             depth_op = VK_ATTACHMENT_LOAD_OP_LOAD;
                             break;
@@ -217,7 +223,7 @@ void CommandBuffer::bind_pass( RenderPassHandle handle_, FramebufferHandle frame
                     depth_attachment_info.resolveMode = VK_RESOLVE_MODE_NONE;
                     depth_attachment_info.loadOp = depth_op;
                     depth_attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                    depth_attachment_info.clearValue = render_pass->output.depth_operation == RenderPassOperation::Enum::Clear ? clear_values[ k_depth_stencil_clear_index ] : VkClearValue{ };
+                    depth_attachment_info.clearValue = render_pass->output.depth_operation == RenderPassOperation::Enum::Clear ? clear_values[k_depth_stencil_clear_index] : VkClearValue{ };
                 }
 
                 VkRenderingInfoKHR rendering_info{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
@@ -230,7 +236,7 @@ void CommandBuffer::bind_pass( RenderPassHandle handle_, FramebufferHandle frame
                 rendering_info.pDepthAttachment =  has_depth_attachment ? &depth_attachment_info : nullptr;
                 rendering_info.pStencilAttachment = nullptr;
 
-                device->cmd_begin_rendering( vk_command_buffer, &rendering_info );
+                device->cmd_begin_rendering(vk_command_buffer, &rendering_info);
 
                 color_attachments_info.shutdown();
             } else {

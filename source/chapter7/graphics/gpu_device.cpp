@@ -283,7 +283,11 @@ void GpuDevice::init( const GpuDeviceCreation& creation ) {
         vkEnumerateDeviceExtensionProperties( vulkan_physical_device, nullptr, &device_extension_count, extensions );
         for ( size_t i = 0; i < device_extension_count; i++ ) {
 
-            if ( !creation.force_disable_dynamic_rendering && !strcmp( extensions[ i ].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME ) ) {
+            if (!creation.force_disable_dynamic_rendering && !strcmp(extensions[i].extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+                // Extension VK_KHR_dynamic_rendering. Allows applications to create single-pass render pass
+                // instances without needing to create render pass objects or framebuffers. Dynamic render passes 
+                // can also span across multiple primary command buffers, rather than relying on secondary command
+                // buffers.
                 dynamic_rendering_extension_present = true;
                 continue;
             }
@@ -381,8 +385,12 @@ void GpuDevice::init( const GpuDeviceCreation& creation ) {
     device_extensions.push( VK_KHR_SWAPCHAIN_EXTENSION_NAME );
     device_extensions.push( VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME );
 
-    if ( dynamic_rendering_extension_present ) {
-        device_extensions.push( VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME );
+    if (dynamic_rendering_extension_present) {
+        // Allows applications to create single-pass render pass instances without
+        // needing to create render pass objects or framebuffers. Dynamic render passes 
+        // can also span across multiple primary command buffers, rather than relying on
+        // secondary command buffers.
+        device_extensions.push(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     }
 
     if ( timeline_semaphore_extension_present ) {
@@ -476,9 +484,10 @@ void GpuDevice::init( const GpuDeviceCreation& creation ) {
         pfnCmdEndDebugUtilsLabelEXT = ( PFN_vkCmdEndDebugUtilsLabelEXT )vkGetDeviceProcAddr( vulkan_device, "vkCmdEndDebugUtilsLabelEXT" );
     }
 
-    if ( dynamic_rendering_extension_present ) {
-        cmd_begin_rendering = ( PFN_vkCmdBeginRenderingKHR )vkGetDeviceProcAddr( vulkan_device, "vkCmdBeginRenderingKHR" );
-        cmd_end_rendering   = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr( vulkan_device, "vkCmdEndRenderingKHR" );
+    if (dynamic_rendering_extension_present) {
+        // Get function pointers to VK_KHR_dynamic_rendering begin/end render functions.
+        cmd_begin_rendering = (PFN_vkCmdBeginRenderingKHR) vkGetDeviceProcAddr(vulkan_device, "vkCmdBeginRenderingKHR");
+        cmd_end_rendering   = (PFN_vkCmdEndRenderingKHR) vkGetDeviceProcAddr(vulkan_device, "vkCmdEndRenderingKHR");
     }
 
     if ( synchronization2_extension_present ) {
@@ -1690,13 +1699,21 @@ PipelineHandle GpuDevice::create_pipeline( const PipelineCreation& creation, con
 
         //// Render Pass
         VkPipelineRenderingCreateInfoKHR pipeline_rendering_create_info{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
-        if ( dynamic_rendering_extension_present ) {
+        if (dynamic_rendering_extension_present) {
+            // The VK_KHR_dynamic_rendering extension allows applications to create single-pass render pass
+            // instances without needing to create render pass objects or framebuffers. Dynamic render passes 
+            // can also span across multiple primary command buffers, rather than relying on secondary command
+            // buffers.
+            //
+            // Specify number of color attachments and their formats, as well as the format of a depth and
+            // stencil attachments.
             pipeline_rendering_create_info.viewMask = 0;
             pipeline_rendering_create_info.colorAttachmentCount = creation.render_pass.num_color_formats;
             pipeline_rendering_create_info.pColorAttachmentFormats = creation.render_pass.num_color_formats > 0 ? creation.render_pass.color_formats : nullptr;
             pipeline_rendering_create_info.depthAttachmentFormat = creation.render_pass.depth_stencil_format;
             pipeline_rendering_create_info.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
 
+            // Chain dynamic rendering settings to VkGraphicsPipelineCreateInfo.
             pipeline_info.pNext = &pipeline_rendering_create_info;
         } else {
             pipeline_info.renderPass = get_vulkan_render_pass( creation.render_pass, creation.name );
