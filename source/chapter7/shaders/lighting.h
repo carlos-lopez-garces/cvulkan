@@ -167,12 +167,21 @@ vec4 calculate_lighting(vec4 base_colour, vec3 orm, vec3 normal, vec3 emissive, 
 
     vec4 pos_camera_space = world_to_camera * vec4( world_position, 1.0 );
 
-    float z_light_far = 100.0f;
-    float linear_d = ( -pos_camera_space.z - z_near ) / ( z_light_far - z_near );
-    int bin_index = int( linear_d / BIN_WIDTH );
-    uint bin_value = bins[ bin_index ];
+    // Determine the lights that illuminate a fragment, by finding the bin and tile (cluster) a fragment is in.
 
+    // Determine depth bin of light.
+    float z_light_far = 100.0f;
+    // Normalized depth of light position ([z_near, z_light_far] mapped to [0, 1]).
+    float linear_d = ( -pos_camera_space.z - z_near ) / ( z_light_far - z_near );
+    // BIN_WIDTH = 1 / NUM_BINS. Since linear_d is in [0, 1], linear_d * NUM_BINS gives
+    // the corresponding bin index.
+    int bin_index = int(linear_d / BIN_WIDTH);
+    uint bin_value = bins[bin_index];
+
+    // The lower bits of bin_value store the index of the closest light of the bin.
+    // Indices sort lights in ascending order of depth. 
     uint min_light_id = bin_value & 0xFFFF;
+    // The upper bits of bin_value store the index of the most distant light of the bin. 
     uint max_light_id = ( bin_value >> 16 ) & 0xFFFF;
 
 #if defined(COMPUTE_COMPUTE)
@@ -180,14 +189,22 @@ vec4 calculate_lighting(vec4 base_colour, vec3 orm, vec3 normal, vec3 emissive, 
 #endif
 
 #if defined(COMPUTE_FRAGMENT) || defined(FRAGMENT_MAIN) || defined (FRAGMENT_TRANSPARENT_NO_CULL) || defined(FRAGMENT_TRANSPARENT_CULL) || defined(FRAGMENT_TRANSPARENT_SKINNING_NO_CULL)
+    // Fragment position.
     // NOTE(marco): integer fragment position and top-left origin
     uvec2 position = uvec2(gl_FragCoord.x - 0.5, gl_FragCoord.y - 0.5);
+    // Invert y.
     position.y = uint( resolution.y ) - position.y;
 #endif
 
+    // TILE_SIZE is 8.
     uvec2 tile = position / uint( TILE_SIZE );
 
+    // NUM_WORDS is the number of u32's needed to get 1 bit per light in the scene.
+    // uint( resolution.x ) / uint( TILE_SIZE ) gives the number of tiles across.
+    // stride is the number of u32's per tile.
     uint stride = uint( NUM_WORDS ) * ( uint( resolution.x ) / uint( TILE_SIZE ) );
+
+    // address is where the set of u32's of this fragment's tile starts.
     uint address = tile.y * stride + tile.x;
 
 #if ENABLE_OPTIMIZATION
@@ -232,14 +249,21 @@ vec4 calculate_lighting(vec4 base_colour, vec3 orm, vec3 normal, vec3 emissive, 
         }
     }
 #else
-    if ( min_light_id != NUM_LIGHTS + 1 ) {
-        for ( uint light_id = min_light_id; light_id <= max_light_id; ++light_id ) {
+    if (min_light_id != NUM_LIGHTS + 1) {
+        // Process each light in the bin. 
+        for (uint light_id = min_light_id; light_id <= max_light_id; ++light_id) {
             uint word_id = light_id / 32;
             uint bit_id = light_id % 32;
 
-            if ( ( tiles[ address + word_id ] & ( 1 << bit_id ) ) != 0 ) {
-                uint global_light_index = light_indices[ light_id ];
-                Light point_light = lights[ global_light_index ];
+            // address is where the set of u32's of this fragment's tile starts.
+            // address + word_id is the u32 that contains the bit of this light.
+            // bit_id is that bit.
+            if ((tiles[address + word_id] & (1 << bit_id)) != 0) {
+                // light_id is the light's index in the array of lights sorted in ascending order of depth.
+                // light_indices sorts lights in ascending order of depth. Each entry is the index in the
+                // original array of lights.
+                uint global_light_index = light_indices[light_id];
+                Light point_light = lights[global_light_index];
 
                 final_color.rgb += calculate_point_light_contribution( albedo, orm, normal, emissive, world_position, V, F0, NoV, point_light );
             }
