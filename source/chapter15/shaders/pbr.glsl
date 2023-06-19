@@ -716,6 +716,9 @@ void main() {
 
 #endif // COMPUTE_SHADOW_VISIBILITY_FILTERING
 
+// Sobel filter, used to find edges, which are usually points of luminance transition.
+// Variable Rate Shading gives a lower shading rate to ares of the image where luminance
+// is uniform.
 #if defined(COMPUTE_EDGE_DETECTION)
 
 // TODO(marco): this should changed based on VkPhysicalDeviceFragmentShadingRatePropertiesKHR::minFragmentShadingRateAttachmentTexelSize
@@ -737,11 +740,16 @@ void main() {
     if ( gl_GlobalInvocationID.x > iresolution.x || gl_GlobalInvocationID.y > iresolution.y )
         return;
 
-    ivec2 local_index = ivec2( gl_LocalInvocationID.xy ) + ivec2( 1, 1 );
-    ivec2 global_index = ivec2( gl_GlobalInvocationID.xy );
+    ivec2 local_index = ivec2(gl_LocalInvocationID.xy) + ivec2(1, 1);
+    ivec2 global_index = ivec2(gl_GlobalInvocationID.xy);
 
+    // Compute the fragment's luminance: we want to reduce the shading rate in regions
+    // where luminance is uniform and do it at full rate in areas of transition, because
+    // the human eye pays more attention to areas of transition.
     local_image_data[ local_index.y ][ local_index.x ] = luminance( texelFetch( global_textures[ color_image_index ], global_index, 0 ).rgb );
 
+    // Note that local_image_data is indexed by local_index, which is unique by thread.
+    // local_image_data is then populated collaboratively: each thread makes only 1? write.
     if ( local_index.x == 1 && local_index.y == 1 ) {
         local_image_data[ local_index.y - 1 ][ local_index.x - 1 ] = luminance( texelFetch( global_textures[ color_image_index ], clamp( global_index + ivec2( -1, -1 ), ivec2( 0 ), iresolution ), 0 ).rgb );
     }
@@ -766,11 +774,13 @@ void main() {
         local_image_data[ local_index.y + 1 ][ local_index.x ] = luminance( texelFetch( global_textures[ color_image_index ], clamp( global_index + ivec2( 0, 1 ), ivec2( 0 ), iresolution ), 0 ).rgb );
     }
 
+    // Thread synchronization point. Make sure all threads have finished before proceeding,
+    // because derivative computation requires access to entries computed by other threads.
     barrier();
 
     float normalization = 1.0; // 0.125;
 
-    // Horizontal filter
+    // Derivative of fragment luminance with respect to x.
     float dx =     local_image_data[ local_index.y - 1 ][ local_index.x - 1 ] -
                    local_image_data[ local_index.y - 1 ][ local_index.x + 1 ] +
                2 * local_image_data[ local_index.y     ][ local_index.x - 1 ] -
@@ -780,7 +790,7 @@ void main() {
 
     dx *= normalization;
 
-    // Vertical filter
+    // Derivative of fragment luminance with respect to y.
     float dy =     local_image_data[ local_index.y - 1 ][ local_index.x - 1 ] +
                2 * local_image_data[ local_index.y - 1 ][ local_index.x     ] +
                    local_image_data[ local_index.y - 1 ][ local_index.x + 1 ] -
@@ -790,13 +800,14 @@ void main() {
 
     dy *= normalization;
 
+    // (dx, dy) is the gradient of the luminance function. d is the norm of this vector.
     float d = pow( dx, 2 ) + pow( dy, 2 );
 
-    // NOTE(marco): 2x2 rate
+    // 2x2 VRS rate: each fragment shader invocation shades 4 fragments using the same value.
     uint rate = 1 << 2 | 1;
 
-    if ( d > 0.1 ) {
-        // NOTE(marco): 1x1 rate
+    if (d > 0.1) {
+        // 1x1 VRS rate: each fragment shader invocation shades a single fragment, as usual.
         rate = 0;
     }
 
@@ -806,8 +817,9 @@ void main() {
 
     barrier();
 
-    if ( gl_LocalInvocationID.xy == uvec2( 0, 0 ) ) {
-        imageStore( global_uimages_2d[ fsr_image_index ], ivec2( gl_GlobalInvocationID.xy / GROUP_SIZE ), uvec4( rate, 0, 0, 0 ) );
+    if (gl_LocalInvocationID.xy == uvec2(0, 0)) {
+        // Store Variable Rate Shading rate.
+        imageStore(global_uimages_2d[fsr_image_index], ivec2(gl_GlobalInvocationID.xy / GROUP_SIZE), uvec4(rate, 0, 0, 0));
     }
 }
 
