@@ -29,7 +29,7 @@ void GameCamera::reset() {
 
     mouse_dragging = false;
     ignore_dragging_frames = 3;
-    mouse_sensitivity = 1.0f;
+    mouse_sensitivity = 0.5f;
 }
 
 // Taken from this article:
@@ -50,9 +50,12 @@ void GameCamera::update( InputService* input, u32 window_width, u32 window_heigh
 
     camera.update();
 
-    // Ignore first dragging frames for mouse movement waiting the cursor to be placed at the center of the screen.
-
-    if ( input->is_mouse_dragging( MOUSE_BUTTONS_RIGHT ) && !ImGui::IsAnyItemHovered() ) {
+    // Camera mouse control is a bit different than usual: the eye doesn't follow the cursor;
+    // you have to press and drag the left mouse button to control the viewing direction; this
+    // allows you to keep GUI selection and camera control separate.
+    //
+    // After releasing the drag, the cursor is moved to the center of the screen.
+    if (input->is_mouse_dragging(MOUSE_BUTTONS_LEFT) && !ImGui::IsAnyItemHovered()) {
 
         if ( ignore_dragging_frames == 0 ) {
             target_yaw -= ( input->mouse_position.x - roundu32(window_width / 2.f) ) * mouse_sensitivity * delta_time;
