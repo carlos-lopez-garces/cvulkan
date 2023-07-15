@@ -3580,7 +3580,9 @@ struct alignas(16) GpuDDGIConstants {
     i32         visibility_texture_width;
     i32         visibility_texture_height;
     i32         visibility_side_length;
-    u32         pad1;
+    // Index into global bindless texture array (global_textures) of the
+    // environment hdri.
+    u32         environment_hdri_texture_index;
 
     mat4s       random_rotation;
 }; // struct DDGIConstants
@@ -3893,6 +3895,8 @@ void IndirectPass::upload_gpu_data( RenderScene& scene ) {
 
         const f32 rotation_scaler = 0.001f;
         gpu_constants->random_rotation = glms_euler_xyz( { get_random_value( -1,1 ) * rotation_scaler, get_random_value( -1,1 ) * rotation_scaler, get_random_value( -1,1 ) * rotation_scaler } );
+
+        gpu_constants->environment_hdri_texture_index = scene.scene_data.environment_hdri_texture_index;
 
         gpu.unmap_buffer( cb_map );
 

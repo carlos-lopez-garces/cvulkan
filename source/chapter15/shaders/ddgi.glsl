@@ -204,7 +204,14 @@ void main() {
 layout( location = 0 ) rayPayloadInEXT RayPayload payload;
 
 void main() {
-	payload.radiance = vec3( 0.529, 0.807, 0.921 );
+    // Solid background color.
+	// payload.radiance = vec3( 0.529, 0.807, 0.921 );
+
+    // Sample environment hdri.
+    vec2 uv = world_to_lat_long(gl_WorldRayDirectionEXT);
+    ivec2 environment_hdri_dims = textureSize(global_textures[nonuniformEXT(environment_hdri_texture_index)], 0);
+    payload.radiance = texelFetch(global_textures[nonuniformEXT(environment_hdri_texture_index)], ivec2(uv * environment_hdri_dims), 0).rgb;
+
     payload.distance = 1000.0f;
 }
 

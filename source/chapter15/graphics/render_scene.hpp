@@ -106,6 +106,11 @@ namespace raptor {
 
         vec4s                   frustum_planes[ 6 ];
 
+        // Index into global bindless texture array (global_textures) of the
+        // environment hdri.
+        u32                     environment_hdri_texture_index;
+        u32                     pad[3];
+
         // Helpers for bit packing. Would be perfect for code generation
         // NOTE: must be in sync with scene.h!
         bool                    frustum_cull_meshes() const             { return ( culling_options &  1 ) ==  1; }
@@ -1459,7 +1464,7 @@ namespace raptor {
         Array<Light>            lights;
         Array<u32>              lights_lut;
         vec3s                   mesh_aabb[2]; // 0 min, 1 max
-        u32                     active_lights   = 1;
+        u32                     active_lights   = 10;
         bool                    shadow_constants_cpu_update = true;
 
         StringBuffer            names_buffer;   // Buffer containing all names of nodes, resources, etc.

@@ -601,10 +601,10 @@ int main( int argc, char** argv ) {
     window.init( &wconf );
 
     InputService input;
-    input.init( allocator );
+    input.init(allocator);
 
     // Callback register: input needs to react to OS messages.
-    window.register_os_messages_callback( input_os_messages_callback, &input );
+    window.register_os_messages_callback(input_os_messages_callback, &input);
 
     // graphics
     GpuDeviceCreation dc;
@@ -730,10 +730,22 @@ int main( int argc, char** argv ) {
     }
 
     static bool use_shader_cache = true;
-    static cstring techniques[] = { "reflections.json", "ddgi.json", "ray_tracing.json",
-                                    "meshlet.json", "fullscreen.json", "main.json",
-                                    "pbr_lighting.json", "dof.json", "cloth.json", "debug.json",
-                                    "culling.json", "volumetric_fog.json" };
+
+    // Pipelines used.
+    static cstring techniques[] = {
+        "reflections.json",
+        "ddgi.json",
+        "ray_tracing.json",
+        "meshlet.json",
+        "fullscreen.json",
+        "main.json",
+        "pbr_lighting.json",
+        "dof.json",
+        "cloth.json",
+        "debug.json",
+        "culling.json",
+        "volumetric_fog.json"
+    };
 
     static bool changed_techniques[ ArraySize( techniques ) ];
     // Single Gpu Technique parsing.
@@ -766,6 +778,7 @@ int main( int argc, char** argv ) {
 
     TextureResource* dither_texture = nullptr;
     TextureResource* blue_noise_128_rg_texture = nullptr;
+    TextureResource *environment_hdri_texture = nullptr;
     SamplerHandle repeat_sampler, repeat_nearest_sampler;
     // Load frame graph and parse gpu techniques
     {
@@ -820,6 +833,11 @@ int main( int argc, char** argv ) {
         gpu.link_texture_sampler( blue_noise_128_rg_texture->handle, repeat_sampler );
 
         scene->blue_noise_128_rg_texture_index = blue_noise_128_rg_texture->handle.index;
+
+        // Read environment hdri into a texture.
+        temporary_name_buffer.clear();
+        cstring environment_hdri_path = temporary_name_buffer.append_use_f("%s/environment.hdr", RAPTOR_DATA_FOLDER);
+        environment_hdri_texture = render_resources_loader.load_texture(environment_hdri_path, false);
 
         // Finally parse all techniques
         load_all_techniques();
@@ -1569,6 +1587,8 @@ int main( int argc, char** argv ) {
             scene_data.frustum_planes[ 3 ] = normalize_plane( glms_vec4_sub( projection_transpose.col[ 3 ], projection_transpose.col[ 1 ] ) ); // y - w  < 0;
             scene_data.frustum_planes[ 4 ] = normalize_plane( glms_vec4_add( projection_transpose.col[ 3 ], projection_transpose.col[ 2 ] ) ); // z + w  < 0;
             scene_data.frustum_planes[ 5 ] = normalize_plane( glms_vec4_sub( projection_transpose.col[ 3 ], projection_transpose.col[ 2 ] ) ); // z - w  < 0;
+
+            scene_data.environment_hdri_texture_index = environment_hdri_texture ? environment_hdri_texture->handle.index : 0;
 
             // Update scene constant buffer
             MapBufferParameters cb_map = { scene->scene_cb, 0, 0 };

@@ -38,7 +38,9 @@ layout ( std140, set = MATERIAL_SET, binding = 55 ) uniform DDGIConstants {
     int         visibility_texture_width;
     int         visibility_texture_height;
     int         visibility_side_length;
-    int         pad003_ddgic;
+    // Index into global bindless texture array (global_textures) of the
+    // environment hdri.
+    int         environment_hdri_texture_index;
 
     mat4        random_rotation;
 };
@@ -227,6 +229,16 @@ ivec3 world_to_grid_indices( vec3 world_position ) {
 int get_probe_index_from_pixels(ivec2 pixels, int probe_with_border_side, int full_texture_width) {
     int probes_per_side = full_texture_width / probe_with_border_side;
     return int(pixels.x / probe_with_border_side) + probes_per_side * int(pixels.y / probe_with_border_side);
+}
+
+// Converts a direction vector from world space to a coordinate on
+// a latitude-longitude projection of the sphere. Used to sample an
+// environment hdri.
+vec2 world_to_lat_long(vec3 world_dir) {
+    vec3 p = normalize(world_dir);
+    float u = (1.f + atan(-p.z, p.x) * PI) * 0.5f;
+    float v = acos(p.y) * ONE_PI;
+    return vec2(u, v);
 }
 
 // Sample Irradiance /////////////////////////////////////////////////////

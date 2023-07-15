@@ -60,6 +60,7 @@ layout( set = GLOBAL_SET, binding = BINDLESS_IMAGES ) writeonly uniform uimage3D
 
 // Common constants //////////////////////////////////////////////////////
 #define PI 3.1415926538
+#define ONE_PI 0.318309886183790671538
 #define INVALID_TEXTURE_INDEX 65535
 
 // Utility ///////////////////////////////////////////////////////////////
